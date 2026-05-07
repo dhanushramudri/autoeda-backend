@@ -189,21 +189,143 @@ class InsightEngine:
             })
         return insights
 
+    def from_missing(self, missing: dict) -> list[dict]:
+        insights = []
+        total_missing_pct = missing.get("missing_pct", 0)
+        if total_missing_pct > 30:
+            insights.append({
+                "chart_type": "Missing Values",
+                "insight": f"Overall dataset missing rate is {total_missing_pct:.1f}% — consider imputation or dropping high-missing columns before modeling.",
+                "severity": "danger",
+            })
+        elif total_missing_pct > 10:
+            insights.append({
+                "chart_type": "Missing Values",
+                "insight": f"Dataset has {total_missing_pct:.1f}% missing values overall. Review imputation strategies.",
+                "severity": "warning",
+            })
+
+        for col in missing.get("columns", []):
+            pct = col.get("pct", 0)
+            name = col.get("name", "")
+            suggestion = missing.get("imputation_suggestions", {}).get(name, "")
+            mcar = missing.get("mcar_indicators", {}).get(name, {})
+
+            if pct > 80:
+                insights.append({
+                    "chart_type": "Missing Values",
+                    "insight": f"'{name}' has {pct:.1f}% missing — drop this column before modeling.",
+                    "severity": "danger",
+                })
+            elif pct > 40:
+                msg = f"'{name}' has {pct:.1f}% missing."
+                if suggestion:
+                    msg += f" Suggested strategy: {suggestion}."
+                insights.append({"chart_type": "Missing Values", "insight": msg, "severity": "warning"})
+
+            if mcar.get("likely") == "MCAR":
+                corr_with = mcar.get("correlated_with", [])
+                if corr_with and pct > 5:
+                    insights.append({
+                        "chart_type": "Missing Values",
+                        "insight": f"'{name}' missingness correlates with {', '.join(corr_with[:2])} — possibly Not Missing At Random (NMAR). Treat carefully.",
+                        "severity": "warning",
+                    })
+        return insights
+
+    def from_feature_importance(self, fi: dict) -> list[dict]:
+        insights = []
+        target = fi.get("target", "target")
+        importances = fi.get("importances", [])
+        problem_type = fi.get("problem_type", "")
+
+        if not importances:
+            if fi.get("error"):
+                insights.append({
+                    "chart_type": "Feature Importance",
+                    "insight": f"Feature importance could not be computed: {fi['error']}",
+                    "severity": "warning",
+                })
+            return insights
+
+        top = importances[0] if importances else None
+        if top:
+            insights.append({
+                "chart_type": "Feature Importance",
+                "insight": f"'{top.get('feature')}' is the most important feature for predicting '{target}' (importance={top.get('importance', 0):.3f}).",
+                "severity": "info",
+            })
+
+        low_importance = [f for f in importances if f.get("importance", 1) < 0.01]
+        if len(low_importance) > 3:
+            names = ", ".join(f["feature"] for f in low_importance[:5])
+            insights.append({
+                "chart_type": "Feature Importance",
+                "insight": f"{len(low_importance)} features have near-zero importance: {names}. Consider removing to reduce model complexity.",
+                "severity": "info",
+            })
+
+        mutual_info = fi.get("mutual_info", [])
+        if mutual_info and mutual_info[0].get("score", 0) > 0.5:
+            top_mi = mutual_info[0]
+            insights.append({
+                "chart_type": "Feature Importance",
+                "insight": f"'{top_mi['feature']}' has high mutual information with '{target}' (MI={top_mi['score']:.3f}), confirming predictive power.",
+                "severity": "info",
+            })
+
+        for c in fi.get("correlations", [])[:3]:
+            r = abs(c.get("correlation", 0))
+            if r > 0.95:
+                insights.append({
+                    "chart_type": "Feature Importance",
+                    "insight": f"'{c['feature']}' has near-perfect correlation with '{target}' (r={c['correlation']:.3f}) — possible target leakage, investigate before training.",
+                    "severity": "danger",
+                })
+
+        insights.append({
+            "chart_type": "Feature Importance",
+            "insight": f"Problem type detected: '{problem_type}'. Using {'Random Forest' if problem_type in ('regression', 'classification') else 'heuristic'} for importance ranking.",
+            "severity": "info",
+        })
+        return insights
+
     def from_text_analysis(self, text: dict) -> list[dict]:
         insights = []
         total = text.get("total_texts", 0)
         if total == 0:
             return insights
-        
+
         sentiment_dist = text.get("sentiment_dist", {})
         negative_pct = (sentiment_dist.get("negative", 0) / total * 100) if total > 0 else 0
+        positive_pct = (sentiment_dist.get("positive", 0) / total * 100) if total > 0 else 0
         if negative_pct > 50:
             insights.append({
                 "chart_type": "Text Analysis",
                 "insight": f"{negative_pct:.1f}% of texts have negative sentiment. Investigate underlying issues.",
                 "severity": "warning",
             })
-        
+        elif positive_pct > 80:
+            insights.append({
+                "chart_type": "Text Analysis",
+                "insight": f"{positive_pct:.1f}% of texts have positive sentiment — data may be skewed or filtered.",
+                "severity": "info",
+            })
+
+        avg_len = text.get("avg_length", 0)
+        if avg_len < 10:
+            insights.append({
+                "chart_type": "Text Analysis",
+                "insight": f"Average text length is very short ({avg_len:.0f} chars). NLP models may struggle with such brief inputs.",
+                "severity": "warning",
+            })
+        elif avg_len > 5000:
+            insights.append({
+                "chart_type": "Text Analysis",
+                "insight": f"Average text length is very long ({avg_len:.0f} chars). Consider chunking for NLP processing.",
+                "severity": "info",
+            })
+
         language = text.get("language", "en")
         if language != "en":
             insights.append({
@@ -211,5 +333,13 @@ class InsightEngine:
                 "insight": f"Detected non-English language ('{language}'). Ensure NLP models support this language.",
                 "severity": "info",
             })
-        
+
+        word_freq = text.get("word_freq", [])
+        if word_freq and word_freq[0].get("count", 0) > total * 0.9:
+            insights.append({
+                "chart_type": "Text Analysis",
+                "insight": f"Top word '{word_freq[0]['word']}' appears in {word_freq[0]['count']/total*100:.0f}% of texts — may be a stop word worth filtering.",
+                "severity": "info",
+            })
+
         return insights

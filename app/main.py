@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .database import init_db
-from .routers import auth, datasets, eda, jobs, workspaces
+from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +35,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:3002",
+
         "http://localhost:3001",
         "http://127.0.0.1:3000",
     ],
@@ -76,6 +78,9 @@ app.include_router(workspaces.router, prefix="/api/v1")
 app.include_router(datasets.router, prefix="/api/v1")
 app.include_router(eda.router, prefix="/api/v1")
 app.include_router(jobs.router, prefix="/api/v1")
+app.include_router(extra.router, prefix="/api/v1")
+app.include_router(sql_editor.router, prefix="/api/v1")
+app.include_router(join_builder.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

@@ -23,7 +23,11 @@ def get_db():
 
 
 def init_db():
-    from .models import user, workspace, dataset, job  # noqa: F401
+    from .models import (  # noqa: F401
+        user, workspace, dataset, job,
+        pipeline_step, column_metadata, data_quality_rule,
+        eda_run, saved_chart, named_segment,
+    )
     Base.metadata.create_all(bind=engine)
     _seed_admin()
 
