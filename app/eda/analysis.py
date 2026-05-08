@@ -297,68 +297,92 @@ def _correlation_data(df: pd.DataFrame, num_cols: list[str]) -> dict:
 
 
 def _scatter_pairs(df: pd.DataFrame, num_cols: list[str]) -> list[dict]:
-    """Top correlated numeric column pairs as scatter data."""
+    print(f"[scatter_pairs] called with {len(num_cols)} cols: {num_cols}")  # add this
+
     if len(num_cols) < 2:
         return []
-    try:
-        sub = df[num_cols].dropna(how="all")
-        corr = sub.corr(method="pearson").abs()
-        pairs = []
-        seen = set()
-        for col in corr.columns:
-            for row in corr.index:
-                if col == row or (row, col) in seen:
-                    continue
-                seen.add((col, row))
-                val = corr.loc[row, col]
-                if not np.isnan(val):
-                    pairs.append((col, row, float(val)))
-        pairs.sort(key=lambda x: x[2], reverse=True)
-        result = []
-        for c1, c2, r in pairs[:MAX_SCATTER_PAIRS]:
-            joined = df[[c1, c2]].dropna()
-            if len(joined) < 10:
-                continue
-            # Downsample for large datasets
-            if len(joined) > 2000:
-                joined = joined.sample(2000, random_state=42)
-            # Linear regression line
-            from scipy import stats as sp_stats
-            try:
-                slope, intercept, rval, _, _ = sp_stats.linregress(joined[c1], joined[c2])
-                x_line = [float(joined[c1].min()), float(joined[c1].max())]
-                y_line = [slope * x + intercept for x in x_line]
-                r2 = rval ** 2
-            except Exception:
-                x_line, y_line, r2 = [], [], None
 
-            result.append({
-                "col1": c1, "col2": c2,
-                "pearson_r": _safe(r),
-                "r2": _safe(r2),
-                "x": [_safe(v) for v in joined[c1].tolist()],
-                "y": [_safe(v) for v in joined[c2].tolist()],
-                "line_x": [_safe(v) for v in x_line],
-                "line_y": [_safe(v) for v in y_line],
-            })
-        return result
-    except Exception:
+    from scipy import stats as sp_stats
+
+    # Exclude ID-like columns (>95% unique) — they produce garbage correlations
+    n = len(df)
+    usable = [c for c in num_cols if df[c].nunique() / n < 0.95]
+    print(f"[scatter_pairs] usable cols after ID filter: {usable}")  # add this
+
+    if len(usable) < 2:
         return []
 
+    try:
+        corr = df[usable].corr(method="pearson").abs()
+    except Exception as e:
+        print(f"[scatter_pairs] corr failed: {e}")
+        return []
+
+    pairs = []
+    seen = set()
+    for col in corr.columns:
+        for row in corr.index:
+            if col == row or (row, col) in seen:
+                continue
+            seen.add((col, row))
+            val = corr.loc[row, col]
+            if pd.notna(val):
+                pairs.append((col, row, float(val)))
+
+    pairs.sort(key=lambda x: x[2], reverse=True)
+
+    result = []
+    for c1, c2, r in pairs[:MAX_SCATTER_PAIRS]:
+        joined = df[[c1, c2]].dropna()
+        if len(joined) < 10:
+            continue
+        if len(joined) > 2000:
+            joined = joined.sample(2000, random_state=42)
+        try:
+            slope, intercept, rval, _, _ = sp_stats.linregress(joined[c1], joined[c2])
+            x_line = [float(joined[c1].min()), float(joined[c1].max())]
+            y_line = [slope * x + intercept for x in x_line]
+            r2 = rval ** 2
+        except Exception as e:
+            print(f"[scatter_pairs] linregress failed for {c1}×{c2}: {e}")
+            x_line, y_line, r2 = [], [], None
+
+        result.append({
+            "col1": c1, "col2": c2,
+            "pearson_r": _safe(r),
+            "r2": _safe(r2),
+            "x": [_safe(v) for v in joined[c1].tolist()],
+            "y": [_safe(v) for v in joined[c2].tolist()],
+            "line_x": [_safe(v) for v in x_line],
+            "line_y": [_safe(v) for v in y_line],
+        })
+    return result
 
 def _grouped_box(df: pd.DataFrame, num_cols: list[str], cat_cols: list[str]) -> dict:
-    """Box plot of highest-variance numeric column grouped by lowest-cardinality cat column."""
-    if not num_cols or not cat_cols:
+    if not num_cols:
         return {}
     try:
-        # Pick numeric col with highest variance
-        variances = {c: df[c].var() for c in num_cols if df[c].notna().sum() > 10}
+        n = len(df)
+        # Also treat low-cardinality numeric cols as grouping candidates
+        low_card_numeric = [
+            c for c in num_cols
+            if 2 <= df[c].nunique() <= 15
+        ]
+        grouping_candidates = cat_cols + [
+            c for c in low_card_numeric if c not in cat_cols
+        ]
+
+        # Pick numeric col with highest variance, excluding ID-like cols
+        usable_num = [c for c in num_cols if df[c].nunique() / n > 0.05]
+        variances = {c: df[c].var() for c in usable_num if df[c].notna().sum() > 10}
         if not variances:
             return {}
         num_col = max(variances, key=lambda k: variances[k] if not np.isnan(variances[k]) else 0)
 
-        # Pick cat col with lowest cardinality (2-15 unique values)
-        candidates = [c for c in cat_cols if 2 <= df[c].nunique() <= 15]
+        # Pick grouping col with lowest cardinality (2-15 unique values)
+        candidates = [c for c in grouping_candidates if 2 <= df[c].nunique() <= 15]
+        # Exclude the chosen numeric col itself
+        candidates = [c for c in candidates if c != num_col]
         if not candidates:
             return {}
         cat_col = min(candidates, key=lambda c: df[c].nunique())
@@ -371,18 +395,21 @@ def _grouped_box(df: pd.DataFrame, num_cols: list[str], cat_cols: list[str]) -> 
             q1, q2, q3 = float(s.quantile(0.25)), float(s.median()), float(s.quantile(0.75))
             iqr = q3 - q1
             lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            outlier_mask = (s < lo) | (s > hi)
             groups[str(grp)] = {
                 "min": _safe(float(s[s >= lo].min()) if s[s >= lo].shape[0] else s.min()),
                 "q1": _safe(q1), "median": _safe(q2), "q3": _safe(q3),
                 "max": _safe(float(s[s <= hi].max()) if s[s <= hi].shape[0] else s.max()),
-                "outliers": [_safe(x) for x in s[(s < lo) | (s > hi)].sample(min(50, ((s < lo) | (s > hi)).sum()), random_state=42).tolist()],
+                "outliers": [_safe(x) for x in s[outlier_mask].sample(
+                    min(50, outlier_mask.sum()), random_state=42).tolist()],
                 "n": int(len(s)),
             }
+        if not groups:
+            return {}
         return {"numeric_col": num_col, "categorical_col": cat_col, "groups": groups}
-    except Exception:
+    except Exception as e:
+        print(f"[grouped_box] failed: {e}")
         return {}
-
-
 # ── statistical cards ─────────────────────────────────────────────────────────
 
 def _normality_table(df: pd.DataFrame, num_cols: list[str]) -> list[dict]:
@@ -477,6 +504,8 @@ def _missing_bar(df: pd.DataFrame) -> list[dict]:
 # ── master engine ─────────────────────────────────────────────────────────────
 
 def run_full_analysis(df: pd.DataFrame) -> dict:
+    import sys
+    print("RUN_FULL_ANALYSIS CALLED", file=sys.stderr, flush=True)
     """
     Compute all chart data for the Analysis page.
     Returns a single dict with all chart data keyed by analysis type.
@@ -569,4 +598,156 @@ def run_full_analysis(df: pd.DataFrame) -> dict:
         "multi_column": multi,
         "missing_charts": missing_charts,
         "stat_cards": stat_cards,
+    }
+
+
+# ── On-demand bivariate analysis ─────────────────────────────────────────────
+
+def compute_bivariate_num_num(df: pd.DataFrame, col1: str, col2: str) -> dict:
+    """Scatter + linear trend for two numeric columns."""
+    from scipy import stats as sp_stats
+    joined = df[[col1, col2]].dropna()
+    if len(joined) < 5:
+        return {"error": "Not enough data", "btype": "num_num"}
+    if len(joined) > 2000:
+        joined = joined.sample(2000, random_state=42)
+    try:
+        slope, intercept, rval, pval, _ = sp_stats.linregress(joined[col1], joined[col2])
+        x_line = [float(joined[col1].min()), float(joined[col1].max())]
+        y_line = [slope * x + intercept for x in x_line]
+        r2 = float(rval ** 2)
+    except Exception:
+        x_line, y_line, r2, rval, pval = [], [], None, None, None
+    return {
+        "btype": "num_num",
+        "col1": col1, "col2": col2,
+        "x": [_safe(v) for v in joined[col1].tolist()],
+        "y": [_safe(v) for v in joined[col2].tolist()],
+        "pearson_r": _safe(rval),
+        "r2": _safe(r2),
+        "p_value": _safe(pval),
+        "line_x": [_safe(v) for v in x_line],
+        "line_y": [_safe(v) for v in y_line],
+        "n": len(joined),
+    }
+
+
+def compute_bivariate_cat_cat(df: pd.DataFrame, col1: str, col2: str) -> dict:
+    """Cross-tabulation grouped bar for two categorical columns."""
+    sub = df[[col1, col2]].dropna()
+    if len(sub) < 5:
+        return {"error": "Not enough data", "btype": "cat_cat"}
+
+    top1 = sub[col1].value_counts().head(10).index.tolist()
+    top2 = sub[col2].value_counts().head(10).index.tolist()
+    sub = sub[sub[col1].isin(top1) & sub[col2].isin(top2)]
+
+    crosstab = pd.crosstab(sub[col1], sub[col2])
+    cat1_labels = [str(x) for x in crosstab.index.tolist()]
+    cat2_labels = [str(x) for x in crosstab.columns.tolist()]
+
+    series = []
+    for c2 in cat2_labels:
+        series.append({
+            "name": c2,
+            "values": [int(crosstab.at[c1, c2]) if c1 in crosstab.index and c2 in crosstab.columns else 0
+                       for c1 in cat1_labels],
+        })
+
+    return {
+        "btype": "cat_cat",
+        "col1": col1, "col2": col2,
+        "cat1_labels": cat1_labels,
+        "cat2_labels": cat2_labels,
+        "series": series,
+        "n": len(sub),
+    }
+
+
+def compute_bivariate_num_cat(df: pd.DataFrame, num_col: str, cat_col: str) -> dict:
+    """Grouped box plot for numeric vs categorical."""
+    sub = df[[num_col, cat_col]].dropna()
+    if len(sub) < 5:
+        return {"error": "Not enough data", "btype": "num_cat"}
+
+    top_cats = sub[cat_col].value_counts().head(12).index.tolist()
+    sub = sub[sub[cat_col].isin(top_cats)]
+
+    groups = {}
+    for grp, gdf in sub.groupby(cat_col):
+        s = gdf[num_col]
+        if len(s) < 3:
+            continue
+        q1, q2, q3 = float(s.quantile(0.25)), float(s.median()), float(s.quantile(0.75))
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        outlier_mask = (s < lo) | (s > hi)
+        groups[str(grp)] = {
+            "min": _safe(float(s[s >= lo].min()) if s[s >= lo].shape[0] else s.min()),
+            "q1": _safe(q1), "median": _safe(q2), "q3": _safe(q3),
+            "max": _safe(float(s[s <= hi].max()) if s[s <= hi].shape[0] else s.max()),
+            "outliers": [_safe(x) for x in s[outlier_mask].sample(
+                min(50, int(outlier_mask.sum())), random_state=42).tolist()],
+            "n": int(len(s)),
+        }
+
+    return {
+        "btype": "num_cat",
+        "numeric_col": num_col, "categorical_col": cat_col,
+        "groups": groups,
+        "n": len(sub),
+    }
+
+
+def compute_pca(df: pd.DataFrame, num_cols: list, n_components: int = 2) -> dict:
+    """PCA on numeric columns — scores, loadings, explained variance."""
+    try:
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.decomposition import PCA as SkPCA
+    except ImportError:
+        return {"error": "scikit-learn not installed"}
+
+    usable = [c for c in num_cols if df[c].notna().sum() > 10]
+    if len(usable) < 2:
+        return {"error": "Need at least 2 numeric columns"}
+
+    sub = df[usable].dropna()
+    if len(sub) < 5:
+        return {"error": "Not enough rows after dropping nulls"}
+
+    n_components = min(n_components, len(usable), len(sub))
+    X = StandardScaler().fit_transform(sub)
+    pca = SkPCA(n_components=n_components)
+    scores = pca.fit_transform(X)
+
+    if len(scores) > 2000:
+        idx = np.random.choice(len(scores), 2000, replace=False)
+        scores = scores[idx]
+
+    loadings = pca.components_
+    return {
+        "n_components": n_components,
+        "explained_variance_ratio": [_safe(v) for v in pca.explained_variance_ratio_.tolist()],
+        "columns": usable,
+        "scores_pc1": [_safe(v) for v in scores[:, 0].tolist()],
+        "scores_pc2": [_safe(v) for v in scores[:, 1].tolist()] if n_components >= 2 else [],
+        "loadings_pc1": [_safe(v) for v in loadings[0].tolist()],
+        "loadings_pc2": [_safe(v) for v in loadings[1].tolist()] if n_components >= 2 else [],
+        "n": len(sub),
+    }
+
+
+def compute_scatter3d(df: pd.DataFrame, x_col: str, y_col: str, z_col: str) -> dict:
+    """3D scatter for three numeric columns."""
+    sub = df[[x_col, y_col, z_col]].dropna()
+    if len(sub) < 5:
+        return {"error": "Not enough data"}
+    if len(sub) > 2000:
+        sub = sub.sample(2000, random_state=42)
+    return {
+        "x_col": x_col, "y_col": y_col, "z_col": z_col,
+        "x": [_safe(v) for v in sub[x_col].tolist()],
+        "y": [_safe(v) for v in sub[y_col].tolist()],
+        "z": [_safe(v) for v in sub[z_col].tolist()],
+        "n": len(sub),
     }

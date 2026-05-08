@@ -137,3 +137,200 @@ class JobStatus(BaseModel):
     progress: int
     message: Optional[str] = None
     result_data: Optional[dict[str, Any]] = None
+
+
+# ─── Comprehensive Analysis Result ────────────────────────────────────────────
+class HistogramKDE(BaseModel):
+    bins: list[Optional[float]] = []
+    counts: list[int] = []
+    kde_x: list[Optional[float]] = []
+    kde_y: list[Optional[float]] = []
+    mean: Optional[float] = None
+    median: Optional[float] = None
+
+
+class BoxStats(BaseModel):
+    min: Optional[float] = None
+    q1: Optional[float] = None
+    median: Optional[float] = None
+    q3: Optional[float] = None
+    max: Optional[float] = None
+    mean: Optional[float] = None
+    outliers: list[Optional[float]] = []
+
+
+class ViolinData(BaseModel):
+    y: list[Optional[float]] = []
+
+
+class QQData(BaseModel):
+    theoretical: list[Optional[float]] = []
+    sample: list[Optional[float]] = []
+    line_x: list[float] = []
+    line_y: list[float] = []
+
+
+class ECDFData(BaseModel):
+    x: list[Optional[float]] = []
+    y: list[Optional[float]] = []
+
+
+class NormalityResult(BaseModel):
+    test: str = ""
+    statistic: Optional[float] = None
+    p_value: Optional[float] = None
+    is_normal: Optional[bool] = None
+
+
+class NumericChartsType(BaseModel):
+    histogram_kde: HistogramKDE = HistogramKDE()
+    box: BoxStats = BoxStats()
+    violin: ViolinData = ViolinData()
+    qq: QQData = QQData()
+    ecdf: ECDFData = ECDFData()
+    normality: NormalityResult = NormalityResult()
+    std: Optional[float] = None
+    skewness: Optional[float] = None
+    kurtosis: Optional[float] = None
+
+
+class BarChartData(BaseModel):
+    labels: list[str] = []
+    values: list[int] = []
+    percentages: list[float] = []
+    other_count: int = 0
+    total_categories: int = 0
+
+
+class PieData(BaseModel):
+    labels: list[str] = []
+    values: list[int] = []
+    percentages: list[float] = []
+
+
+class ParetoData(BaseModel):
+    labels: list[str] = []
+    values: list[int] = []
+    cumulative_pct: list[float] = []
+
+
+class CategoricalChartsType(BaseModel):
+    bar: BarChartData = BarChartData()
+    pie: Optional[PieData] = None
+    pareto: ParetoData = ParetoData()
+
+
+class TimeseriesData(BaseModel):
+    dates: list[str] = []
+    values: list[Optional[float]] = []
+
+
+class SeasonalityData(BaseModel):
+    by_hour: dict[str, Any] = {}
+    by_dow: dict[str, Any] = {}
+    by_month: dict[str, Any] = {}
+
+
+class DatetimeChartsType(BaseModel):
+    timeseries: TimeseriesData = TimeseriesData()
+    seasonality: SeasonalityData = SeasonalityData()
+
+
+class ScatterPairType(BaseModel):
+    col1: str
+    col2: str
+    pearson_r: Optional[float] = None
+    r2: Optional[float] = None
+    x: list[Optional[float]] = []
+    y: list[Optional[float]] = []
+    line_x: list[float] = []
+    line_y: list[float] = []
+
+
+class GroupedBoxGroup(BaseModel):
+    min: Optional[float] = None
+    q1: Optional[float] = None
+    median: Optional[float] = None
+    q3: Optional[float] = None
+    max: Optional[float] = None
+    outliers: list[Optional[float]] = []
+    n: int = 0
+
+
+class GroupedBoxData(BaseModel):
+    numeric_col: str
+    categorical_col: str
+    groups: dict[str, GroupedBoxGroup] = {}
+
+
+class CorrelationHeatmapData(BaseModel):
+    labels: list[str] = []
+    z: list[list[Optional[float]]] = []
+
+
+class MultiColumnAnalysis(BaseModel):
+    correlation: CorrelationHeatmapData = CorrelationHeatmapData()
+    scatter_pairs: list[ScatterPairType] = []
+    grouped_box: Optional[GroupedBoxData] = None
+
+
+class MissingBarItem(BaseModel):
+    column: str
+    missing_count: int
+    missing_pct: Optional[float] = None
+
+
+class NormalityRow(BaseModel):
+    column: str
+    n: int
+    test: str
+    p_value: Optional[float] = None
+    is_normal: Optional[bool] = None
+    skewness: Optional[float] = None
+    kurtosis: Optional[float] = None
+
+
+class OutlierSummaryRow(BaseModel):
+    column: str
+    outlier_count: int
+    outlier_pct: Optional[float] = None
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+
+
+class CardinalityRow(BaseModel):
+    column: str
+    unique_count: int
+    unique_pct: Optional[float] = None
+    flag: str = "normal"  # id_like | constant | binary | low_cardinality | normal
+    dtype: str
+
+
+class DuplicateInfo(BaseModel):
+    total_rows: int
+    duplicate_count: int
+    duplicate_pct: Optional[float] = None
+
+
+class StatCards(BaseModel):
+    normality_table: list[NormalityRow] = []
+    outlier_summary: list[OutlierSummaryRow] = []
+    cardinality: list[CardinalityRow] = []
+    duplicates: DuplicateInfo = DuplicateInfo(total_rows=0, duplicate_count=0)
+    missing_bar: list[MissingBarItem] = []
+
+
+class FullAnalysisResult(BaseModel):
+    sampled: bool = False
+    sample_size: int = 0
+    total_rows: int = 0
+    column_types: dict[str, str] = {}
+    numeric_cols: list[str] = []
+    categorical_cols: list[str] = []
+    datetime_cols: list[str] = []
+    numeric_charts: dict[str, NumericChartsType] = {}
+    categorical_charts: dict[str, CategoricalChartsType] = {}
+    datetime_charts: dict[str, DatetimeChartsType] = {}
+    multi_column: MultiColumnAnalysis = MultiColumnAnalysis()
+    missing_charts: dict[str, Any] = {}
+    stat_cards: StatCards = StatCards()

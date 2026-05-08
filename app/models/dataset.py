@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from ..database import Base
+from sqlalchemy import Boolean
 
 
 def _now():
@@ -16,6 +17,21 @@ class Dataset(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("data_sources.id"),
+        nullable=True
+    )
+
+    source_table: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    is_materialized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False
+    )
     source_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

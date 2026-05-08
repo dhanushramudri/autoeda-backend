@@ -131,11 +131,16 @@ def get_warehouse_catalog(
 
     # ── Section 1: Uploaded datasets ──────────────────────────────────────────
     datasets = _get_ready_datasets(wid, db)
-    dataset_items = []
+
+    workspace_dataset_items = []
+    source_dataset_map: dict[int, list] = {}
+
     for ds in datasets:
         slug = _slugify(ds.name)
         fp = ds.file_path.replace("\\", "/")
+
         columns = []
+
         try:
             con = duckdb.connect(":memory:")
             _register_file_view(con, slug, fp)
@@ -143,7 +148,8 @@ def get_warehouse_catalog(
             con.close()
         except Exception:
             pass
-        dataset_items.append({
+
+        item = {
             "slug": slug,
             "name": ds.name,
             "id": ds.id,
@@ -151,22 +157,33 @@ def get_warehouse_catalog(
             "column_count": ds.column_count,
             "source_type": ds.source_type,
             "columns": columns,
-        })
+        }
 
-    if dataset_items:
+        # Imported from source
+        if ds.source_id:
+            if ds.source_id not in source_dataset_map:
+                source_dataset_map[ds.source_id] = []
+
+            source_dataset_map[ds.source_id].append(item)
+
+        # Uploaded dataset
+        else:
+            workspace_dataset_items.append(item)
+
+    if workspace_dataset_items:
         sections.append({
             "type": "datasets",
             "label": "Workspace Datasets",
             "icon": "upload",
             "status": "ok",
-            "items": dataset_items,
+            "items": workspace_dataset_items,
         })
 
     # ── Section 2+: Connected data sources ────────────────────────────────────
     sources = _get_workspace_sources(wid, db)
     for src in sources:
         source_slug = _slugify(src.name)
-        items = []
+        items = source_dataset_map.get(src.id, []).copy()
         error = None
 
         try:

@@ -222,6 +222,31 @@ def get_dataset_by_id(
     return ds
 
 
+@router.get("/datasets/{dataset_id}/preview", response_model=DatasetPreview)
+def preview_dataset_shorthand(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Shorthand endpoint for dataset preview without requiring workspace_id"""
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    _assert_member(ds.workspace_id, current_user, db)
+
+    try:
+        df = _load_dataset_df(ds, limit=100)
+        rows = df.head(100).fillna("").astype(str).to_dict(orient="records")
+        return DatasetPreview(
+            columns=df.columns.tolist(),
+            dtypes={col: str(dtype) for col, dtype in df.dtypes.items()},
+            rows=rows,
+            total_rows=len(df),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/datasets/{dataset_id}/transform")
 def transform_dataset(
     dataset_id: int,

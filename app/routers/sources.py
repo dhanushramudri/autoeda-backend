@@ -57,9 +57,9 @@ class TestConnectionRequest(BaseModel):
 
 
 class ImportDataRequest(BaseModel):
-    source_id: int
     dataset_name: str
     workspace_id: int
+    table: Optional[str] = None
     limit: Optional[int] = 50000
 
 
@@ -355,12 +355,18 @@ def import_as_dataset(
         workspace_id=wid,
         name=body.dataset_name,
         description=f"Imported from {src.name} ({src.source_type})",
+
         source_type=src.source_type,
+        source_id=src.id,
+        source_table=body.table,
+        is_materialized=True,
+
         file_path=file_path,
         row_count=len(df),
         column_count=len(df.columns),
         file_size_bytes=os.path.getsize(file_path),
         content_hash=content_hash,
+
         status="ready",
         created_by=current_user.id,
     )

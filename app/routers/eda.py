@@ -93,6 +93,8 @@ def get_profile(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+
 @router.get("/{dataset_id}/missing", response_model=MissingResult)
 def get_missing(
     dataset_id: int,
@@ -309,13 +311,29 @@ def get_insights(
 @router.get("/{dataset_id}/analysis")
 def get_analysis(
     dataset_id: int,
+    force_refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Full EDA analysis — all chart data in one call. Cached per dataset version."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
     cache_key = {"type": "analysis"}
+
+    if force_refresh:
+        from ..models.dataset import EDAResult
+        db.query(EDAResult).filter(
+            EDAResult.dataset_id == dataset_id,
+            EDAResult.analysis_type == "analysis",
+        ).delete()
+        db.commit()
+
     cached = get_cached_result(db, dataset_id, "analysis", cache_key, ds.content_hash or "")
+    if cached:
+        # Validate cache has scatter_pairs — if not, it's stale from the old broken route
+        multi = cached.get("multi_column", {})
+        if "scatter_pairs" not in multi:
+            cached = None  # force recompute
+
     if cached:
         return cached
 
@@ -380,6 +398,90 @@ def get_analysis_column(
         return result
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/bivariate")
+def get_bivariate(
+    dataset_id: int,
+    col1: str,
+    col2: str,
+    btype: str = "num_num",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """On-demand bivariate analysis for a specific column pair."""
+    if btype not in ("num_num", "cat_cat", "num_cat"):
+        raise HTTPException(status_code=400, detail="btype must be num_num, cat_cat, or num_cat")
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "bivariate", "col1": col1, "col2": col2, "btype": btype}
+    cached = get_cached_result(db, dataset_id, "bivariate", cache_key, ds.content_hash or "")
+    if cached:
+        return cached
+    try:
+        df = _load_df(ds)
+        from ..eda.analysis import (
+            compute_bivariate_num_num, compute_bivariate_cat_cat, compute_bivariate_num_cat
+        )
+        if btype == "num_num":
+            result = compute_bivariate_num_num(df, col1, col2)
+        elif btype == "cat_cat":
+            result = compute_bivariate_cat_cat(df, col1, col2)
+        else:
+            result = compute_bivariate_num_cat(df, col1, col2)
+        store_result(db, dataset_id, "bivariate", cache_key, result, ds.content_hash or "")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/pca")
+def get_pca(
+    dataset_id: int,
+    n_components: int = 2,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """PCA on all numeric columns."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "pca", "n_components": n_components}
+    cached = get_cached_result(db, dataset_id, "pca", cache_key, ds.content_hash or "")
+    if cached:
+        return cached
+    try:
+        df = _load_df(ds)
+        from ..eda.analysis import compute_pca
+        from ..eda.profiler import classify_column
+        num_cols = [c for c in df.columns if classify_column(df[c]) == "numeric"]
+        result = compute_pca(df, num_cols, n_components)
+        store_result(db, dataset_id, "pca", cache_key, result, ds.content_hash or "")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/scatter3d")
+def get_scatter3d(
+    dataset_id: int,
+    x: str,
+    y: str,
+    z: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """3D scatter for three numeric columns."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "scatter3d", "x": x, "y": y, "z": z}
+    cached = get_cached_result(db, dataset_id, "scatter3d", cache_key, ds.content_hash or "")
+    if cached:
+        return cached
+    try:
+        df = _load_df(ds)
+        from ..eda.analysis import compute_scatter3d
+        result = compute_scatter3d(df, x, y, z)
+        store_result(db, dataset_id, "scatter3d", cache_key, result, ds.content_hash or "")
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
