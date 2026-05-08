@@ -306,6 +306,84 @@ def get_insights(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/{dataset_id}/analysis")
+def get_analysis(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Full EDA analysis — all chart data in one call. Cached per dataset version."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "analysis"}
+    cached = get_cached_result(db, dataset_id, "analysis", cache_key, ds.content_hash or "")
+    if cached:
+        return cached
+
+    try:
+        df = _load_df(ds)
+        from ..eda.analysis import run_full_analysis
+        result = run_full_analysis(df)
+        store_result(db, dataset_id, "analysis", cache_key, result, ds.content_hash or "")
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/analysis/column/{col_name}")
+def get_analysis_column(
+    dataset_id: int,
+    col_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Chart data for a single column (lazy-loading support)."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    try:
+        df = _load_df(ds)
+        from ..eda.analysis import (
+            _histogram_kde, _box_stats, _violin_kde, _qq_plot, _ecdf,
+            _normality_test, _bar_chart, _pie_data, _pareto_data,
+            _safe, _maybe_sample,
+        )
+        from ..eda.profiler import classify_column
+
+        df_sample, sampled = _maybe_sample(df)
+        if col_name not in df.columns:
+            raise HTTPException(status_code=404, detail=f"Column '{col_name}' not found")
+
+        col_type = classify_column(df[col_name])
+        s = df_sample[col_name]
+
+        if col_type == "numeric":
+            result = {
+                "col_name": col_name, "col_type": col_type, "sampled": sampled,
+                "histogram_kde": _histogram_kde(s),
+                "box": _box_stats(s),
+                "violin": _violin_kde(s),
+                "qq": _qq_plot(s),
+                "ecdf": _ecdf(s),
+                "normality": _normality_test(s.dropna()),
+                "skewness": _safe(float(s.skew())) if s.dropna().shape[0] >= 3 else None,
+                "kurtosis": _safe(float(s.kurtosis())) if s.dropna().shape[0] >= 4 else None,
+            }
+        elif col_type in ("categorical", "boolean"):
+            sd = s.dropna()
+            result = {
+                "col_name": col_name, "col_type": col_type, "sampled": sampled,
+                "bar": _bar_chart(sd),
+                "pie": _pie_data(sd),
+                "pareto": _pareto_data(sd),
+            }
+        else:
+            result = {"col_name": col_name, "col_type": col_type, "sampled": sampled}
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/{dataset_id}/transform/preview")
 def transform_preview(
     dataset_id: int,

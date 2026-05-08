@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_active_user
 from ..database import get_db
 from ..models.dataset import Dataset
+from ..models.data_source import DataSource
 from ..models.user import User
 from ..models.workspace import Workspace, WorkspaceMember
 from ..schemas.workspace import (
@@ -34,6 +35,7 @@ def _build_response(ws: Workspace, db: Session) -> WorkspaceResponse:
         for m, u in members_raw
     ]
     dataset_count = db.query(Dataset).filter(Dataset.workspace_id == ws.id).count()
+    source_count = db.query(DataSource).filter(DataSource.workspace_id == ws.id).count()
     return WorkspaceResponse(
         id=ws.id,
         name=ws.name,
@@ -44,6 +46,7 @@ def _build_response(ws: Workspace, db: Session) -> WorkspaceResponse:
         updated_at=ws.updated_at,
         member_count=len(members),
         dataset_count=dataset_count,
+        source_count=source_count,
         members=members,
     )
 

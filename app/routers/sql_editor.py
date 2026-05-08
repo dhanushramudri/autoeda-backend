@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models.dataset import Dataset
-from ..routers.auth import get_current_user
+from ..auth import get_current_active_user
 from ..models.user import User
 
 router = APIRouter(tags=["sql_editor"])
@@ -22,11 +22,18 @@ def _load_duckdb():
         raise HTTPException(status_code=503, detail="DuckDB not installed. Run: pip install duckdb")
 
 
-def _get_dataset_file(dataset_id: str, db: Session, user: User) -> str:
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+def _get_dataset_file(dataset_id: str, db: Session, user: User = None) -> str:
+    try:
+        did = int(dataset_id)
+    except (ValueError, TypeError):
+        did = dataset_id  # type: ignore[assignment]
+    ds = db.query(Dataset).filter(Dataset.id == did).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    return ds.file_path
+    if not ds.file_path:
+        raise HTTPException(status_code=400, detail="Dataset has no file attached")
+    fp = ds.file_path.replace("\\", "/")
+    return fp
 
 
 class SqlExecuteRequest(BaseModel):
@@ -43,7 +50,7 @@ def execute_sql(
     dataset_id: str,
     body: SqlExecuteRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_active_user),
 ):
     duckdb = _load_duckdb()
     file_path = _get_dataset_file(dataset_id, db, current_user)
@@ -103,7 +110,7 @@ def explain_sql(
     dataset_id: str,
     body: SqlExplainRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_active_user),
 ):
     duckdb = _load_duckdb()
     file_path = _get_dataset_file(dataset_id, db, current_user)
@@ -133,7 +140,7 @@ def explain_sql(
 def get_schema(
     dataset_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_active_user),
 ):
     duckdb = _load_duckdb()
     file_path = _get_dataset_file(dataset_id, db, current_user)

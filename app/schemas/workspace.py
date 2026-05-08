@@ -36,6 +36,7 @@ class WorkspaceResponse(BaseModel):
     updated_at: datetime
     member_count: int = 0
     dataset_count: int = 0
+    source_count: int = 0
     members: list[WorkspaceMemberInfo] = []
 
 
