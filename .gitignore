@@ -152,3 +152,4 @@ storage/
 uploads/
 downloads/
 logs/
+.vercel
