@@ -147,9 +147,11 @@ temp/
 .DS_Store
 Thumbs.db
 
-# Application specific
-storage/
-uploads/
+# Application specific — ignore contents but keep directory via .gitkeep
+app/storage/*
+!app/storage/.gitkeep
+uploads/*
+!uploads/.gitkeep
 downloads/
 logs/
 .vercel

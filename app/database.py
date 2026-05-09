@@ -1,6 +1,16 @@
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
+
+# Ensure the SQLite storage directory exists before the engine is created
+if settings.DATABASE_URL.startswith("sqlite:///"):
+    _db_path = settings.DATABASE_URL[len("sqlite:///"):]
+    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+
+# Ensure the file upload storage directory exists
+Path(settings.STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 
 engine = create_engine(
     settings.DATABASE_URL,
