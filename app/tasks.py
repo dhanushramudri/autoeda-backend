@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 logger = logging.getLogger("autoeda.tasks")
 
 # One shared executor — tune max_workers to your CPU count
-_executor = ThreadPoolExecutor(max_workers=4)
+_executor = ThreadPoolExecutor(max_workers=8)
 
 
 def _update_job(db, job_id: str, status: str, progress: int, message: str, error: str = None):
@@ -101,13 +101,13 @@ def run_eda_pipeline(job_id: str, dataset_id: int, file_path: str | None, config
         _update_job(db, job_id, "running", 5, "Loading dataset...")
         df = _load_dataframe(dataset_id, file_path, config)
 
-        # ── Step 2: Metadata (instant) ────────────────────────────────
+        # ── Step 2: Metadata — mark ready immediately so user can explore ─
         _update_job(db, job_id, "running", 15, "Updating metadata...")
         ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
         if ds:
             ds.row_count = len(df)
             ds.column_count = len(df.columns)
-            ds.status = "processing"
+            ds.status = "ready"  # ready NOW — analysis enriches in background
             ds.schema_info = json.dumps({col: str(dtype) for col, dtype in df.dtypes.items()})
             db.commit()
 
@@ -154,13 +154,7 @@ def run_eda_pipeline(job_id: str, dataset_id: int, file_path: str | None, config
                 # Don't abort — one bad step shouldn't kill the whole pipeline
                 completed += 1
 
-        # ── Step 4: Mark ready ────────────────────────────────────────
-        _update_job(db, job_id, "running", 95, "Finalizing...")
-        ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
-        if ds:
-            ds.status = "ready"
-            db.commit()
-
+        # ── Step 4: Finalize ──────────────────────────────────────────
         _update_job(db, job_id, "completed", 100, "EDA pipeline complete")
         logger.info(f"EDA pipeline complete for dataset {dataset_id}")
 

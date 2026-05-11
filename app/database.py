@@ -51,6 +51,10 @@ def _seed_admin():
     try:
         admin = db.query(User).filter(User.email == settings.ADMIN_EMAIL).first()
         if admin:
+            # Re-hash if the stored hash is corrupted (not a valid bcrypt hash)
+            if not admin.hashed_password.startswith("$2"):
+                admin.hashed_password = get_password_hash(settings.ADMIN_PASSWORD)
+                db.commit()
             return
 
         admin = User(

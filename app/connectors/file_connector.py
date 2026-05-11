@@ -21,7 +21,16 @@ class FileConnector(BaseConnector):
 
         if ext == ".csv":
             sep = config.get("delimiter") or self.auto_detect_delimiter(path)
-            df = pd.read_csv(path, sep=sep, low_memory=False)
+            try:
+                # pyarrow CSV reader is 3-10x faster than pandas C engine
+                import pyarrow.csv as pa_csv
+                import pyarrow as pa
+                read_opts = pa_csv.ReadOptions()
+                parse_opts = pa_csv.ParseOptions(delimiter=sep)
+                table = pa_csv.read_csv(path, read_options=read_opts, parse_options=parse_opts)
+                df = table.to_pandas()
+            except Exception:
+                df = pd.read_csv(path, sep=sep, low_memory=False)
         elif ext in (".xlsx", ".xls"):
             sheet = config.get("sheet_name", 0)
             df = pd.read_excel(path, sheet_name=sheet)
@@ -39,7 +48,7 @@ class FileConnector(BaseConnector):
                 else:
                     raise ValueError("Unsupported JSON structure")
         elif ext == ".parquet":
-            df = pd.read_parquet(path)
+            df = pd.read_parquet(path, engine="pyarrow")
         elif ext in (".tsv", ".txt"):
             df = pd.read_csv(path, sep="\t", low_memory=False)
         else:

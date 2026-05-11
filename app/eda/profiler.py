@@ -79,17 +79,28 @@ def profile_column(series: pd.Series) -> dict:
 
 
 def run_profile(df: pd.DataFrame) -> dict:
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+
     sampled = len(df) > MAX_FULL_ROWS
     work_df = df.sample(SAMPLE_ROWS, random_state=42) if sampled else df
+
+    # Duplicate check on a sample to keep it fast on large datasets
+    dup_df = df.sample(min(50_000, len(df)), random_state=42) if len(df) > 50_000 else df
+    dup_count = int(dup_df.duplicated().sum())
+
+    # Profile columns concurrently
+    cols = list(work_df.columns)
+    with _TPE(max_workers=min(8, len(cols) or 1)) as pool:
+        profiles = list(pool.map(lambda c: profile_column(work_df[c]), cols))
 
     return {
         "total_rows": int(len(df)),
         "total_columns": int(len(df.columns)),
         "memory_mb": round(float(df.memory_usage(deep=True).sum() / 1024**2), 3),
         "file_size_bytes": None,
-        "duplicate_count": int(df.duplicated().sum()),
-        "duplicate_pct": round(float(df.duplicated().sum() / max(len(df), 1) * 100), 2),
+        "duplicate_count": dup_count,
+        "duplicate_pct": round(dup_count / max(len(dup_df), 1) * 100, 2),
         "sampled": sampled,
         "sample_size": SAMPLE_ROWS if sampled else int(len(df)),
-        "columns": [profile_column(work_df[col]) for col in work_df.columns],
+        "columns": profiles,
     }
