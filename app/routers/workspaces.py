@@ -136,6 +136,33 @@ def delete_workspace(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     _assert_role(workspace_id, current_user, db, ["admin"])
+
+    # Delete children in dependency order to satisfy FK constraints
+    from ..models.dataset import EDAResult
+    from ..models.job import BackgroundJob
+    from ..models.saved_chart import SavedChart
+    from ..models.column_metadata import ColumnMetadata
+    from ..models.data_quality_rule import DataQualityRule
+    from ..models.eda_run import EDARunRecord
+    from ..models.pipeline_step import PipelineStep
+    from ..models.named_segment import NamedSegment
+
+    dataset_ids = [d.id for d in db.query(Dataset.id).filter(Dataset.workspace_id == workspace_id).all()]
+
+    if dataset_ids:
+        db.query(EDAResult).filter(EDAResult.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(BackgroundJob).filter(BackgroundJob.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(SavedChart).filter(SavedChart.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(ColumnMetadata).filter(ColumnMetadata.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(DataQualityRule).filter(DataQualityRule.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(EDARunRecord).filter(EDARunRecord.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(PipelineStep).filter(PipelineStep.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(NamedSegment).filter(NamedSegment.dataset_id.in_(dataset_ids)).delete(synchronize_session=False)
+        db.query(Dataset).filter(Dataset.workspace_id == workspace_id).delete(synchronize_session=False)
+
+    db.query(DataSource).filter(DataSource.workspace_id == workspace_id).delete(synchronize_session=False)
+    db.query(SavedChart).filter(SavedChart.workspace_id == workspace_id).delete(synchronize_session=False)
+    db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace_id).delete(synchronize_session=False)
     db.delete(ws)
     db.commit()
 
