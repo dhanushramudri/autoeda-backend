@@ -3,13 +3,13 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    SECRET_KEY: str = "change-this-to-a-random-32-character-string-in-production"
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
-    DATABASE_URL: str = "sqlite:///./app/storage/autoeda.db"
+    DATABASE_URL: str
     STORAGE_PATH: str = "./app/storage"
-    ADMIN_EMAIL: str = "admin@jmangroup.com"
-    ADMIN_PASSWORD: str = "Admin@123"
+    ADMIN_EMAIL: str
+    ADMIN_PASSWORD: str
 
     class Config:
         env_file = ".env"

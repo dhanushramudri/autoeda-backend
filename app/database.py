@@ -4,18 +4,26 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
 
-# Ensure the SQLite storage directory exists before the engine is created
-if settings.DATABASE_URL.startswith("sqlite:///"):
-    _db_path = settings.DATABASE_URL[len("sqlite:///"):]
-    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
-
 # Ensure the file upload storage directory exists
 Path(settings.STORAGE_PATH).mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
-)
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
+
+if _is_sqlite:
+    _db_path = settings.DATABASE_URL.split("sqlite:///")[-1]
+    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    engine = create_engine(
+        settings.DATABASE_URL,
+        pool_size=10,
+        max_overflow=20,
+        pool_pre_ping=True,      # drops dead connections before use
+        pool_recycle=1800,       # recycle connections every 30 min
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -38,6 +46,8 @@ def init_db():
         pipeline_step, column_metadata, data_quality_rule,
         eda_run, saved_chart, named_segment, data_source,
     )
+    # When using Alembic this is a no-op safety net for fresh installs only.
+    # Run `alembic upgrade head` for proper migrations.
     Base.metadata.create_all(bind=engine)
     _seed_admin()
 
