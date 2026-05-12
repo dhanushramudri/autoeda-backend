@@ -1,6 +1,6 @@
 import hashlib
+import io
 import json
-import os
 import uuid
 from typing import Optional
 
@@ -14,7 +14,6 @@ from ..models.job import BackgroundJob
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
 from ..schemas.dataset import DatasetCreateResponse, DatasetPreview, DatasetResponse
-from ..config import settings
 
 router = APIRouter(tags=["datasets"])
 
@@ -84,22 +83,11 @@ async def create_dataset(
         content_hash = hashlib.md5(content).hexdigest()
         file_size = len(content)
 
-        # Always store bytes in DB — works in any environment
+        # Store file bytes in DB — works in every environment (no disk required)
         ds.file_data = content
         ds.content_hash = content_hash
         ds.file_size_bytes = file_size
-        ds.file_path = file.filename  # keep original filename for extension detection
-
-        # Also write to local disk as a read cache (best-effort)
-        try:
-            storage_dir = os.path.join(settings.STORAGE_PATH, str(workspace_id), str(dataset_id))
-            os.makedirs(storage_dir, exist_ok=True)
-            local_path = os.path.join(storage_dir, file.filename)
-            with open(local_path, "wb") as f:
-                f.write(content)
-            ds.file_path = local_path
-        except OSError:
-            pass  # no local disk available — DB copy is the source of truth
+        ds.file_path = file.filename  # original filename kept for extension detection only
 
     db.commit()
     db.refresh(ds)
@@ -149,9 +137,6 @@ def delete_dataset(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.workspace_id == workspace_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    if ds.file_path and os.path.exists(ds.file_path):
-        os.remove(ds.file_path)
 
     db.delete(ds)
     db.commit()
@@ -260,7 +245,6 @@ def transform_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    from ..connectors.file_connector import FileConnector
     import pandas as pd
 
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
@@ -268,8 +252,6 @@ def transform_dataset(
         raise HTTPException(status_code=404, detail="Dataset not found")
     _assert_member(ds.workspace_id, current_user, db, ["admin", "analyst"])
 
-    config = json.loads(ds.source_config or "{}")
-    config["file_path"] = ds.file_path
     df = _load_dataset_df(ds)
     operations = payload.get("operations", [])
 
@@ -321,12 +303,16 @@ def transform_dataset(
         except Exception:
             pass
 
-    out_dir = os.path.join(settings.STORAGE_PATH, str(ds.workspace_id), str(dataset_id), "transformed")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "transformed.csv")
-    df.to_csv(out_path, index=False)
+    # Save transformed result back to DB as CSV bytes
+    buf = io.BytesIO()
+    df.to_csv(buf, index=False)
+    csv_bytes = buf.getvalue()
+    ds.file_data = csv_bytes
+    ds.file_size_bytes = len(csv_bytes)
+    ds.file_path = (ds.file_path or "").rsplit(".", 1)[0] + ".csv" if ds.file_path else "transformed.csv"
+    db.commit()
 
-    return {"message": "Transformations applied", "rows": len(df), "columns": len(df.columns), "path": out_path}
+    return {"message": "Transformations applied", "rows": len(df), "columns": len(df.columns)}
 
 
 @router.get("/datasets/{dataset_id}/export")
@@ -335,18 +321,27 @@ def export_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    from fastapi.responses import FileResponse, StreamingResponse
-    import io
+    from fastapi.responses import StreamingResponse
 
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
     _assert_member(ds.workspace_id, current_user, db)
 
-    transformed_path = os.path.join(settings.STORAGE_PATH, str(ds.workspace_id), str(dataset_id), "transformed", "transformed.csv")
-    if os.path.exists(transformed_path):
-        return FileResponse(transformed_path, media_type="text/csv", filename=f"{ds.name}_transformed.csv")
+    # Serve DB bytes directly if available (covers file datasets in all environments)
+    if ds.file_data:
+        filename = ds.file_path or f"{ds.name}.csv"
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "csv"
+        media_types = {"csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       "parquet": "application/octet-stream", "json": "application/json"}
+        media_type = media_types.get(ext, "application/octet-stream")
+        return StreamingResponse(
+            iter([ds.file_data]),
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{ds.name}.{ext}"'},
+        )
 
+    # Fallback: load via connector and stream as CSV
     df = _load_dataset_df(ds)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
@@ -359,8 +354,8 @@ def export_dataset(
 
 
 def _load_dataset_df(ds: Dataset, limit: int = None):
-    import pandas as pd
-    from ..connectors.file_connector import FileConnector
+    import os
+    from ..connectors.file_connector import FileConnector, load_from_bytes
     from ..connectors.db_connector import DBConnector
     from ..connectors.api_connector import RESTAPIConnector
     from ..connectors.cloud_connector import CloudConnector
@@ -368,8 +363,14 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
-        config["file_path"] = ds.file_path
-        return FileConnector().load_data(config, limit=limit)
+        filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+        if ds.file_data:
+            return load_from_bytes(ds.file_data, filename, config)
+        elif ds.file_path and os.path.exists(ds.file_path):
+            config["file_path"] = ds.file_path
+            return FileConnector().load_data(config, limit=limit)
+        else:
+            raise HTTPException(status_code=400, detail=f"Dataset {ds.id} has no accessible file data")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config, limit=limit)

@@ -7,7 +7,6 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
     DATABASE_URL: str
-    STORAGE_PATH: str = "./app/storage"
     ADMIN_EMAIL: str
     ADMIN_PASSWORD: str
 
