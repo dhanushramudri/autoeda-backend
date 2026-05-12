@@ -4,9 +4,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from .config import settings
 
-# Ensure the file upload storage directory exists
-Path(settings.STORAGE_PATH).mkdir(parents=True, exist_ok=True)
-
 _is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 
 if _is_sqlite:
