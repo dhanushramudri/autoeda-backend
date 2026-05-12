@@ -42,8 +42,9 @@ def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) ->
 
 
 def _load_df(ds: Dataset):
+    import os
     import pandas as pd
-    from ..connectors.file_connector import FileConnector
+    from ..connectors.file_connector import FileConnector, load_from_bytes
     from ..connectors.db_connector import DBConnector
     from ..connectors.api_connector import RESTAPIConnector
     from ..connectors.cloud_connector import CloudConnector
@@ -51,8 +52,15 @@ def _load_df(ds: Dataset):
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
-        config["file_path"] = ds.file_path
-        return FileConnector().load_data(config)
+        filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+        # Use local disk if available (fast), fall back to DB bytes
+        if ds.file_path and os.path.exists(ds.file_path):
+            config["file_path"] = ds.file_path
+            return FileConnector().load_data(config)
+        elif ds.file_data:
+            return load_from_bytes(ds.file_data, filename, config)
+        else:
+            raise FileNotFoundError(f"No file data available for dataset {ds.id}")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config)

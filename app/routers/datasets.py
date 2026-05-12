@@ -80,20 +80,26 @@ async def create_dataset(
     dataset_id = ds.id
 
     if file:
-        storage_dir = os.path.join(settings.STORAGE_PATH, str(workspace_id), str(dataset_id))
-        os.makedirs(storage_dir, exist_ok=True)
-        file_path = os.path.join(storage_dir, file.filename)
-
         content = await file.read()
         content_hash = hashlib.md5(content).hexdigest()
         file_size = len(content)
 
-        with open(file_path, "wb") as f:
-            f.write(content)
-
-        ds.file_path = file_path
+        # Always store bytes in DB — works in any environment
+        ds.file_data = content
         ds.content_hash = content_hash
         ds.file_size_bytes = file_size
+        ds.file_path = file.filename  # keep original filename for extension detection
+
+        # Also write to local disk as a read cache (best-effort)
+        try:
+            storage_dir = os.path.join(settings.STORAGE_PATH, str(workspace_id), str(dataset_id))
+            os.makedirs(storage_dir, exist_ok=True)
+            local_path = os.path.join(storage_dir, file.filename)
+            with open(local_path, "wb") as f:
+                f.write(content)
+            ds.file_path = local_path
+        except OSError:
+            pass  # no local disk available — DB copy is the source of truth
 
     db.commit()
     db.refresh(ds)

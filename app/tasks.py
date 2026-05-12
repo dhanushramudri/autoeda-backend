@@ -24,11 +24,8 @@ def _update_job(db, job_id: str, status: str, progress: int, message: str, error
 
 
 def _load_dataframe(dataset_id: int, file_path: str | None, config: dict):
-    """Load DataFrame — uses file_path directly if available, no extra DB hit."""
-    if file_path:
-        from .connectors.file_connector import FileConnector
-        return FileConnector().load_data({"file_path": file_path})
-
+    """Load DataFrame — local disk first, DB bytes fallback, then connectors."""
+    import os
     from .database import SessionLocal
     from .models.dataset import Dataset
 
@@ -41,9 +38,17 @@ def _load_dataframe(dataset_id: int, file_path: str | None, config: dict):
         src = ds.source_type
         cfg = json.loads(ds.source_config or "{}")
 
-        if ds.file_path:
-            from .connectors.file_connector import FileConnector
-            return FileConnector().load_data({"file_path": ds.file_path})
+        if src == "file":
+            from .connectors.file_connector import FileConnector, load_from_bytes
+            filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+            local = file_path or ds.file_path
+            if local and os.path.exists(local):
+                cfg["file_path"] = local
+                return FileConnector().load_data(cfg)
+            elif ds.file_data:
+                return load_from_bytes(ds.file_data, filename, cfg)
+            else:
+                raise FileNotFoundError(f"No file data for dataset {dataset_id}")
         elif src in ("postgresql", "mysql", "sqlite", "mssql"):
             from .connectors.db_connector import DBConnector
             cfg["db_type"] = src

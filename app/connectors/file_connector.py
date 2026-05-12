@@ -8,6 +8,45 @@ import pandas as pd
 from .base import BaseConnector
 
 
+def load_from_bytes(content: bytes, filename: str, config: dict = None) -> pd.DataFrame:
+    """Load a DataFrame from raw bytes — used when the file is stored in the DB."""
+    config = config or {}
+    ext = os.path.splitext(filename)[1].lower()
+    buf = io.BytesIO(content)
+
+    if ext == ".csv":
+        sep = config.get("delimiter", ",")
+        try:
+            import pyarrow.csv as pa_csv
+            read_opts = pa_csv.ReadOptions()
+            parse_opts = pa_csv.ParseOptions(delimiter=sep)
+            import pyarrow as pa
+            table = pa_csv.read_csv(buf, read_options=read_opts, parse_options=parse_opts)
+            return table.to_pandas()
+        except Exception:
+            buf.seek(0)
+            return pd.read_csv(buf, sep=sep, low_memory=False)
+    elif ext in (".xlsx", ".xls"):
+        sheet = config.get("sheet_name", 0)
+        return pd.read_excel(buf, sheet_name=sheet)
+    elif ext == ".json":
+        try:
+            return pd.read_json(buf)
+        except Exception:
+            buf.seek(0)
+            import json
+            data = json.load(buf)
+            if isinstance(data, list):
+                return pd.DataFrame(data)
+            return pd.json_normalize(data)
+    elif ext == ".parquet":
+        return pd.read_parquet(buf, engine="pyarrow")
+    elif ext in (".tsv", ".txt"):
+        return pd.read_csv(buf, sep="\t", low_memory=False)
+    else:
+        return pd.read_csv(buf, low_memory=False)
+
+
 class FileConnector(BaseConnector):
     def connect(self, config: dict):
         path = config.get("file_path")
