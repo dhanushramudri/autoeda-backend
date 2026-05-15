@@ -77,9 +77,16 @@ def _normalize_wid(workspace_id: str) -> int:
         raise HTTPException(status_code=400, detail="Invalid workspace id")
 
 
-def _get_ready_datasets(wid: int, db: Session) -> list[Dataset]:
+def _get_ready_datasets(wid: int, db: Session, load_data: bool = False) -> list[Dataset]:
+    """
+    Load file datasets that are ready.
+    `load_data=False` defers the heavy file_data blob — use for catalog / slug matching.
+    `load_data=True`  fetches everything — use only after you know which rows you need.
+    """
     from sqlalchemy import or_
-    return (
+    from sqlalchemy.orm import defer as sa_defer
+
+    q = (
         db.query(Dataset)
         .filter(
             Dataset.workspace_id == wid,
@@ -88,8 +95,27 @@ def _get_ready_datasets(wid: int, db: Session) -> list[Dataset]:
             or_(Dataset.file_data.isnot(None), Dataset.file_path.isnot(None)),
         )
         .order_by(Dataset.name)
-        .all()
     )
+    if not load_data:
+        q = q.options(sa_defer(Dataset.file_data))
+    return q.all()
+
+
+def _columns_from_schema_info(ds: Dataset) -> list[dict]:
+    """Extract column list from the schema_info JSON stored by the EDA pipeline — zero I/O."""
+    if not ds.schema_info:
+        return []
+    import json
+    try:
+        schema = json.loads(ds.schema_info)
+        return [{"name": col, "type": dtype} for col, dtype in schema.items()]
+    except Exception:
+        return []
+
+
+def _slugs_referenced(sql: str, slugs: list[str]) -> set[str]:
+    """Return the subset of slugs that appear as identifiers in the SQL."""
+    return {s for s in slugs if re.search(r"\b" + re.escape(s) + r"\b", sql, re.IGNORECASE)}
 
 
 def _get_workspace_sources(wid: int, db: Session) -> list[DataSource]:
@@ -131,27 +157,19 @@ def get_warehouse_catalog(
     - One section for workspace-uploaded datasets
     """
     wid = _normalize_wid(workspace_id)
-    duckdb = _load_duckdb()
 
     sections = []
 
-    # ── Section 1: Uploaded datasets ──────────────────────────────────────────
-    datasets = _get_ready_datasets(wid, db)
+    # ── Section 1: Uploaded datasets ─────────────────────────────────────────
+    # Defer file_data — schema_info has all column info we need, no file I/O.
+    datasets = _get_ready_datasets(wid, db, load_data=False)
 
     workspace_dataset_items = []
     source_dataset_map: dict[int, list] = {}
 
     for ds in datasets:
         slug = _slugify(ds.name)
-        columns = []
-
-        try:
-            con = duckdb.connect(":memory:")
-            _register_dataset(con, slug, ds)
-            columns = _describe_view(con, slug)
-            con.close()
-        except Exception:
-            pass
+        columns = _columns_from_schema_info(ds)
 
         item = {
             "slug": slug,
@@ -275,16 +293,35 @@ def execute_warehouse_sql(
     wid = _normalize_wid(workspace_id)
     duckdb = _load_duckdb()
 
-    datasets = _get_ready_datasets(wid, db)
+    # Step 1: load metadata only (no file_data blob) to compute slugs.
+    all_datasets = _get_ready_datasets(wid, db, load_data=False)
     sources = _get_workspace_sources(wid, db)
+
+    # Step 2: find which dataset slugs appear in the SQL.
+    slug_to_id = {_slugify(ds.name): ds.id for ds in all_datasets}
+    needed_slugs = _slugs_referenced(body.sql, list(slug_to_id.keys()))
+
+    # Step 3: fetch only the needed datasets WITH file_data.
+    needed_ids = [slug_to_id[s] for s in needed_slugs]
+    if needed_ids:
+        datasets_with_data = (
+            db.query(Dataset).filter(Dataset.id.in_(needed_ids)).all()
+        )
+        id_to_ds = {ds.id: ds for ds in datasets_with_data}
+    else:
+        id_to_ds = {}
 
     try:
         con = duckdb.connect(":memory:")
         registered: list[str] = []
 
-        # 1. Register all workspace datasets (loads from DB bytes)
-        for ds in datasets:
-            slug = _slugify(ds.name)
+        # 4. Register only the referenced datasets.
+        for slug, ds_id in slug_to_id.items():
+            if slug not in needed_slugs:
+                continue
+            ds = id_to_ds.get(ds_id)
+            if not ds:
+                continue
             try:
                 _register_dataset(con, slug, ds)
                 registered.append(slug)
@@ -380,15 +417,24 @@ def explain_warehouse_sql(
     current_user: User = Depends(get_current_active_user),
 ):
     wid = _normalize_wid(workspace_id)
-    datasets = _get_ready_datasets(wid, db)
     duckdb = _load_duckdb()
+    all_datasets = _get_ready_datasets(wid, db, load_data=False)
+    slug_to_id = {_slugify(ds.name): ds.id for ds in all_datasets}
+    needed_slugs = _slugs_referenced(body.sql, list(slug_to_id.keys()))
+    needed_ids = [slug_to_id[s] for s in needed_slugs]
+    datasets_with_data = db.query(Dataset).filter(Dataset.id.in_(needed_ids)).all() if needed_ids else []
+    id_to_ds = {ds.id: ds for ds in datasets_with_data}
     try:
         con = duckdb.connect(":memory:")
-        for ds in datasets:
-            try:
-                _register_dataset(con, _slugify(ds.name), ds)
-            except Exception:
-                pass
+        for slug, ds_id in slug_to_id.items():
+            if slug not in needed_slugs:
+                continue
+            ds = id_to_ds.get(ds_id)
+            if ds:
+                try:
+                    _register_dataset(con, slug, ds)
+                except Exception:
+                    pass
         result = con.execute(f"EXPLAIN {body.sql}")
         rows = result.fetchall()
         con.close()
