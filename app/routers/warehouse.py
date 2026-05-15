@@ -330,21 +330,29 @@ def execute_warehouse_sql(
                 "error": "No tables could be loaded. Check your data sources and datasets.",
             }
 
-        sql = body.sql.strip().rstrip(";")
-        safe_sql = f"SELECT * FROM ({sql}) __q LIMIT {body.limit}"
+        # Split on semicolons so multi-statement SQL works correctly.
+        # Execute each statement; return the last one that produces rows.
+        statements = [s.strip() for s in body.sql.split(";") if s.strip()]
+
+        columns: list[str] = []
+        rows: list[list[Any]] = []
+        elapsed_ms = 0
 
         t0 = time.perf_counter()
-        result = con.execute(safe_sql)
+        for stmt in statements:
+            result = con.execute(stmt)
+            if result.description:
+                columns = [d[0] for d in result.description]
+                fetched = result.fetchall()
+                # Apply limit to the last SELECT result
+                rows = [list(r) for r in fetched[:body.limit]]
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
-
-        columns = [d[0] for d in result.description]
-        rows: list[list[Any]] = result.fetchall()
         con.close()
 
         return {
             "sql": body.sql,
             "columns": columns,
-            "rows": [list(r) for r in rows],
+            "rows": rows,
             "row_count": len(rows),
             "elapsed_ms": elapsed_ms,
             "truncated": len(rows) >= body.limit,
@@ -378,7 +386,7 @@ def explain_warehouse_sql(
         con = duckdb.connect(":memory:")
         for ds in datasets:
             try:
-                _register_file_view(con, _slugify(ds.name), ds.file_path)
+                _register_dataset(con, _slugify(ds.name), ds)
             except Exception:
                 pass
         result = con.execute(f"EXPLAIN {body.sql}")
