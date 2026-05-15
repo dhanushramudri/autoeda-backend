@@ -42,20 +42,24 @@ def _load_duckdb():
         raise HTTPException(status_code=503, detail="DuckDB not installed")
 
 
-def _register_file_view(con, view_name: str, fp: str):
-    fp = fp.replace("\\", "/")
-    ext = fp.rsplit(".", 1)[-1].lower() if "." in fp else "csv"
-    if ext in ("csv", "tsv"):
-        con.execute(f"CREATE VIEW {view_name} AS SELECT * FROM read_csv_auto('{fp}')")
-    elif ext == "parquet":
-        con.execute(f"CREATE VIEW {view_name} AS SELECT * FROM read_parquet('{fp}')")
-    elif ext in ("xls", "xlsx"):
-        import pandas as pd
-        con.register(view_name, pd.read_excel(fp))
-    elif ext == "json":
-        con.execute(f"CREATE VIEW {view_name} AS SELECT * FROM read_json_auto('{fp}')")
+def _register_dataset(con, view_name: str, ds: Dataset):
+    """Register a dataset as a DuckDB view — always loads from DB bytes, never disk."""
+    import os
+    from ..connectors.file_connector import FileConnector, load_from_bytes
+    import json
+
+    config = json.loads(ds.source_config or "{}")
+    filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+
+    if ds.file_data:
+        df = load_from_bytes(ds.file_data, filename, config)
+    elif ds.file_path and os.path.exists(ds.file_path):
+        config["file_path"] = ds.file_path
+        df = FileConnector().load_data(config)
     else:
-        con.execute(f"CREATE VIEW {view_name} AS SELECT * FROM read_csv_auto('{fp}')")
+        raise ValueError(f"Dataset '{ds.name}' has no accessible file data")
+
+    con.register(view_name, df)
 
 
 def _describe_view(con, view_name: str) -> list[dict]:
@@ -74,12 +78,14 @@ def _normalize_wid(workspace_id: str) -> int:
 
 
 def _get_ready_datasets(wid: int, db: Session) -> list[Dataset]:
+    from sqlalchemy import or_
     return (
         db.query(Dataset)
         .filter(
             Dataset.workspace_id == wid,
-            Dataset.file_path.isnot(None),
+            Dataset.source_type == "file",
             Dataset.status == "ready",
+            or_(Dataset.file_data.isnot(None), Dataset.file_path.isnot(None)),
         )
         .order_by(Dataset.name)
         .all()
@@ -137,13 +143,11 @@ def get_warehouse_catalog(
 
     for ds in datasets:
         slug = _slugify(ds.name)
-        fp = ds.file_path.replace("\\", "/")
-
         columns = []
 
         try:
             con = duckdb.connect(":memory:")
-            _register_file_view(con, slug, fp)
+            _register_dataset(con, slug, ds)
             columns = _describe_view(con, slug)
             con.close()
         except Exception:
@@ -278,11 +282,11 @@ def execute_warehouse_sql(
         con = duckdb.connect(":memory:")
         registered: list[str] = []
 
-        # 1. Register all workspace datasets (files → DuckDB views)
+        # 1. Register all workspace datasets (loads from DB bytes)
         for ds in datasets:
             slug = _slugify(ds.name)
             try:
-                _register_file_view(con, slug, ds.file_path)
+                _register_dataset(con, slug, ds)
                 registered.append(slug)
             except Exception:
                 pass
