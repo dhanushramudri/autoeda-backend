@@ -255,11 +255,16 @@ def transform_dataset(
     df = _load_dataset_df(ds)
     operations = payload.get("operations", [])
 
+    import numpy as np
+
+    errors_log = []
     for op in operations:
         op_type = op.get("type")
         try:
+            # ── Existing ops ──────────────────────────────────────────────────
             if op_type == "drop_columns":
                 df = df.drop(columns=[c for c in op.get("columns", []) if c in df.columns], errors="ignore")
+
             elif op_type == "fill_missing":
                 col, strategy, val = op.get("column"), op.get("strategy", "mean"), op.get("value")
                 if col in df.columns:
@@ -268,28 +273,40 @@ def transform_dataset(
                     elif strategy == "median" and pd.api.types.is_numeric_dtype(df[col]):
                         df[col] = df[col].fillna(df[col].median())
                     elif strategy == "mode":
-                        df[col] = df[col].fillna(df[col].mode()[0])
+                        df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else np.nan)
                     elif strategy == "constant" and val is not None:
                         df[col] = df[col].fillna(val)
+                    elif strategy == "ffill":
+                        df[col] = df[col].ffill()
+                    elif strategy == "bfill":
+                        df[col] = df[col].bfill()
+
             elif op_type == "encode":
                 col, method = op.get("column"), op.get("method", "label")
                 if col in df.columns:
                     if method == "onehot":
-                        dummies = pd.get_dummies(df[col], prefix=col)
+                        dummies = pd.get_dummies(df[col], prefix=col, dtype=int)
                         df = pd.concat([df.drop(columns=[col]), dummies], axis=1)
                     else:
                         df[col] = df[col].astype("category").cat.codes
+
             elif op_type == "scale":
                 col, method = op.get("column"), op.get("method", "standard")
                 if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
                     if method == "standard":
                         from sklearn.preprocessing import StandardScaler
                         df[[col]] = StandardScaler().fit_transform(df[[col]])
-                    else:
+                    elif method == "minmax":
                         from sklearn.preprocessing import MinMaxScaler
                         df[[col]] = MinMaxScaler().fit_transform(df[[col]])
+                    elif method == "robust":
+                        from sklearn.preprocessing import RobustScaler
+                        df[[col]] = RobustScaler().fit_transform(df[[col]])
+
             elif op_type == "drop_duplicates":
-                df = df.drop_duplicates()
+                subset = op.get("subset") or None
+                df = df.drop_duplicates(subset=subset)
+
             elif op_type == "drop_outliers":
                 col, method = op.get("column"), op.get("method", "iqr")
                 if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
@@ -297,11 +314,170 @@ def transform_dataset(
                         q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
                         iqr = q3 - q1
                         df = df[(df[col] >= q1 - 1.5 * iqr) & (df[col] <= q3 + 1.5 * iqr)]
-                    else:
+                    elif method == "zscore":
                         from scipy import stats
-                        df = df[abs(stats.zscore(df[col].dropna())) < 3]
-        except Exception:
-            pass
+                        mask = np.abs(stats.zscore(df[col].fillna(df[col].median()))) < 3
+                        df = df[mask]
+
+            # ── Column ops ───────────────────────────────────────────────────
+            elif op_type == "rename_column":
+                old, new = op.get("old_name"), op.get("new_name")
+                if old in df.columns and new and new not in df.columns:
+                    df = df.rename(columns={old: new})
+
+            elif op_type == "cast_type":
+                col, to_type = op.get("column"), op.get("to_type")
+                if col in df.columns:
+                    if to_type == "int":
+                        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                    elif to_type == "float":
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                    elif to_type == "str":
+                        df[col] = df[col].astype(str)
+                    elif to_type == "datetime":
+                        df[col] = pd.to_datetime(df[col], errors="coerce")
+                    elif to_type == "bool":
+                        df[col] = df[col].astype(bool)
+
+            elif op_type == "select_columns":
+                cols = [c for c in op.get("columns", []) if c in df.columns]
+                if cols:
+                    df = df[cols]
+
+            elif op_type == "reorder_columns":
+                cols = op.get("columns", [])
+                existing = [c for c in cols if c in df.columns]
+                rest = [c for c in df.columns if c not in existing]
+                df = df[existing + rest]
+
+            elif op_type == "create_column":
+                name, expr = op.get("name"), op.get("expression", "")
+                if name and expr:
+                    # Restricted eval — only column refs and numpy math
+                    allowed = {c: df[c] for c in df.columns}
+                    allowed.update({"np": np, "abs": abs, "round": round})
+                    df[name] = eval(expr, {"__builtins__": {}}, allowed)  # noqa: S307
+
+            # ── Cleaning ops ─────────────────────────────────────────────────
+            elif op_type == "cap_outliers":
+                col, method = op.get("column"), op.get("method", "iqr")
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    if method == "iqr":
+                        q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
+                        iqr = q3 - q1
+                        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                    else:
+                        lp = op.get("lower_pct", 1)
+                        up = op.get("upper_pct", 99)
+                        lower, upper = df[col].quantile(lp / 100), df[col].quantile(up / 100)
+                    df[col] = df[col].clip(lower=lower, upper=upper)
+
+            elif op_type == "clip":
+                col = op.get("column")
+                lower, upper = op.get("lower"), op.get("upper")
+                if col in df.columns:
+                    df[col] = df[col].clip(
+                        lower=float(lower) if lower is not None else None,
+                        upper=float(upper) if upper is not None else None,
+                    )
+
+            elif op_type == "filter_rows":
+                col, operator, value = op.get("column"), op.get("operator"), op.get("value")
+                if col in df.columns and operator:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        v = float(value)
+                    else:
+                        v = value
+                    op_map = {
+                        "eq": df[col] == v, "neq": df[col] != v,
+                        "gt": df[col] > v,  "gte": df[col] >= v,
+                        "lt": df[col] < v,  "lte": df[col] <= v,
+                        "contains": df[col].astype(str).str.contains(str(value), na=False),
+                        "not_contains": ~df[col].astype(str).str.contains(str(value), na=False),
+                        "startswith": df[col].astype(str).str.startswith(str(value)),
+                        "endswith": df[col].astype(str).str.endswith(str(value)),
+                    }
+                    if operator in op_map:
+                        df = df[op_map[operator]]
+
+            elif op_type == "drop_rows_where_null":
+                cols = op.get("columns") or list(df.columns)
+                df = df.dropna(subset=[c for c in cols if c in df.columns])
+
+            elif op_type == "sample_rows":
+                n, frac = op.get("n"), op.get("frac")
+                seed = op.get("random_state", 42)
+                if n:
+                    df = df.sample(n=min(int(n), len(df)), random_state=seed)
+                elif frac:
+                    df = df.sample(frac=float(frac), random_state=seed)
+
+            elif op_type == "sort_rows":
+                by = op.get("by", [])
+                ascending = op.get("ascending", [True] * len(by))
+                valid = [c for c in by if c in df.columns]
+                asc = ascending[:len(valid)] if isinstance(ascending, list) else [ascending] * len(valid)
+                if valid:
+                    df = df.sort_values(by=valid, ascending=asc).reset_index(drop=True)
+
+            # ── Feature engineering ───────────────────────────────────────────
+            elif op_type == "log_transform":
+                col, variant = op.get("column"), op.get("variant", "log1p")
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    new_name = op.get("new_name") or f"{col}_{variant}"
+                    df[new_name] = np.log1p(df[col]) if variant == "log1p" else np.log(df[col].clip(lower=1e-9))
+
+            elif op_type == "sqrt_transform":
+                col = op.get("column")
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    new_name = op.get("new_name") or f"{col}_sqrt"
+                    df[new_name] = np.sqrt(df[col].clip(lower=0))
+
+            elif op_type == "bin":
+                col = op.get("column")
+                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                    bins = op.get("bins", 5)
+                    labels = op.get("labels") or None
+                    strategy = op.get("strategy", "cut")
+                    new_name = op.get("new_name") or f"{col}_bin"
+                    if strategy == "qcut":
+                        df[new_name] = pd.qcut(df[col], q=bins, labels=labels, duplicates="drop")
+                    else:
+                        df[new_name] = pd.cut(df[col], bins=bins, labels=labels)
+
+            elif op_type == "extract_datetime":
+                col = op.get("column")
+                if col in df.columns:
+                    dt = pd.to_datetime(df[col], errors="coerce")
+                    for part in op.get("parts", []):
+                        if part == "year":    df[f"{col}_year"]    = dt.dt.year
+                        elif part == "month": df[f"{col}_month"]   = dt.dt.month
+                        elif part == "day":   df[f"{col}_day"]     = dt.dt.day
+                        elif part == "hour":  df[f"{col}_hour"]    = dt.dt.hour
+                        elif part == "minute":df[f"{col}_minute"]  = dt.dt.minute
+                        elif part == "weekday":df[f"{col}_weekday"]= dt.dt.dayofweek
+                        elif part == "quarter":df[f"{col}_quarter"]= dt.dt.quarter
+
+            elif op_type == "text_clean":
+                col = op.get("column")
+                if col in df.columns:
+                    s = df[col].astype(str)
+                    if op.get("strip", False):
+                        s = s.str.strip()
+                    if op.get("lowercase", False):
+                        s = s.str.lower()
+                    if op.get("uppercase", False):
+                        s = s.str.upper()
+                    rep_from = op.get("replace_from")
+                    rep_to = op.get("replace_to", "")
+                    if rep_from:
+                        s = s.str.replace(rep_from, rep_to, regex=op.get("regex", False))
+                    if op.get("remove_special", False):
+                        s = s.str.replace(r"[^a-zA-Z0-9\s]", "", regex=True)
+                    df[col] = s
+
+        except Exception as e:
+            errors_log.append({"op": op_type, "error": str(e)})
 
     # Save transformed result back to DB as CSV bytes
     buf = io.BytesIO()
@@ -312,7 +488,13 @@ def transform_dataset(
     ds.file_path = (ds.file_path or "").rsplit(".", 1)[0] + ".csv" if ds.file_path else "transformed.csv"
     db.commit()
 
-    return {"message": "Transformations applied", "rows": len(df), "columns": len(df.columns)}
+    return {
+        "message": "Transformations applied",
+        "rows": len(df),
+        "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "errors": errors_log,
+    }
 
 
 @router.get("/datasets/{dataset_id}/export")

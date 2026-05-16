@@ -134,6 +134,25 @@ def ai_chat(
     return {"reply": reply}
 
 
+@router.get("/datasets/{dataset_id}/ai/transform-suggestions")
+def get_transform_suggestions(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = _get_ds(dataset_id, current_user, db)
+    if ds.status != "ready":
+        return {"suggestions": []}
+
+    content_hash = ds.content_hash or ""
+    profile = get_cached_result(db, ds.id, "profile", {}, content_hash) or {}
+    quality = get_cached_result(db, ds.id, "quality_score", {}, content_hash) or {}
+
+    from ..ai.transform_advisor import get_transform_suggestions as _get_suggestions
+    suggestions = _get_suggestions(profile, quality)
+    return {"suggestions": suggestions}
+
+
 @router.get("/ai/provider")
 def get_provider_info():
     """Return the active AI provider name (for UI display)."""
