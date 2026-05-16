@@ -1,58 +1,48 @@
-"""Gemini-powered NL query parser with regex fallback."""
+"""LLM-powered NL query parser with regex fallback."""
 import json
 import logging
 
-from .gemini_client import generate
+from .llm import generate
 from ..nl_parser import parse_nl_query as _regex_parse
 
 logger = logging.getLogger("autoeda.ai.nl_query")
 
-_SYSTEM_PROMPT = """You are a natural language query router for a data analysis platform called AutoEDA.
-Given a user's plain-English query and a list of dataset column names, return a JSON object with exactly these fields:
-  - action: one of "navigate", "transform", "filter", "unknown"
-  - params: dict of parameters relevant to the action
-  - message: a short human-readable confirmation (under 15 words)
+_PROMPT = """You are a query router for AutoEDA, a data analysis platform.
+Parse the user's plain-English query into a JSON action object.
 
-Available pages for action="navigate":
-  overview, profile, distributions, correlations, missing, outliers, feature-importance,
-  timeseries, text, graph, pivot, charts
+Return ONLY valid JSON with exactly these fields:
+  action: "navigate" | "transform" | "filter" | "unknown"
+  params: dict (see rules below)
+  message: short confirmation under 15 words
 
-For action="navigate" params should include "page" and optionally "column", "col1", "col2", "target".
+Navigate pages: overview, profile, distributions, correlations, missing, outliers,
+  feature-importance, timeseries, text, graph, pivot, charts
+  params: {page, column?, col1?, col2?, target?}
 
-For action="transform" params should include "op" (one of: drop, fill_missing, drop_high_missing)
-  and optionally "column", "method" (mean/median/mode/custom), "threshold".
+Transform ops: drop, fill_missing, drop_high_missing
+  params: {op, column?, method?(mean/median/mode/custom), threshold?}
 
-For action="filter" params should include "column", "operator" (equals/gt/lt/gte/lte/not_equals), "value".
+Filter:
+  params: {column, operator(equals/gt/lt/gte/lte/not_equals), value}
 
-Respond with ONLY a valid JSON object, no markdown, no explanation.
-
-Column names available: {columns}
-
-User query: {query}"""
+Available columns: {columns}
+Query: {query}"""
 
 
 def parse_nl_query_ai(query: str, columns: list[str]) -> dict:
-    """Try Gemini first; fall back to regex parser on failure."""
+    """Try LLM first; fall back to regex on failure or missing provider."""
     cols_repr = ", ".join(columns[:60]) if columns else "(none)"
-    prompt = _SYSTEM_PROMPT.format(columns=cols_repr, query=query)
+    prompt = _PROMPT.format(columns=cols_repr, query=query)
 
-    raw = generate(prompt, temperature=0.1)
+    raw = generate(prompt, temperature=0.1, max_tokens=256)
     if raw:
         try:
-            # Strip markdown code fences if present
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1]
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:]
-            result = json.loads(cleaned.strip())
+            cleaned = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+            result = json.loads(cleaned)
             if isinstance(result, dict) and "action" in result and "params" in result:
                 result.setdefault("message", "")
-                logger.info("Gemini parsed: action=%s params=%s", result["action"], result["params"])
                 return result
         except (json.JSONDecodeError, KeyError) as e:
-            logger.warning("Gemini response not valid JSON: %s | raw=%s", e, raw[:200])
+            logger.warning("LLM NL response not valid JSON: %s | raw=%s", e, raw[:200])
 
-    # Fallback to regex
-    logger.info("Falling back to regex parser for query: %s", query[:80])
     return _regex_parse(query, columns)

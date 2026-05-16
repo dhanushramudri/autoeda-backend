@@ -2,7 +2,7 @@
 import json
 import logging
 from collections import Counter
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -111,6 +111,7 @@ def get_narrative(
 class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, Any]] = []
+    page_context: Optional[dict[str, Any]] = None
 
 
 @router.post("/datasets/{dataset_id}/ai/chat")
@@ -128,5 +129,13 @@ def ai_chat(
         message=body.message,
         history=body.history,
         dataset_context=ctx,
+        page_context=body.page_context,
     )
     return {"reply": reply}
+
+
+@router.get("/ai/provider")
+def get_provider_info():
+    """Return the active AI provider name (for UI display)."""
+    from ..ai.llm import provider_name
+    return {"provider": provider_name()}
