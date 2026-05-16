@@ -24,7 +24,7 @@ from ..models.pipeline_step import PipelineStep
 from ..models.saved_chart import SavedChart
 from ..models.user import User
 from ..models.workspace import WorkspaceMember, Workspace
-from ..nl_parser import parse_nl_query
+from ..ai.nl_query import parse_nl_query_ai as parse_nl_query
 
 router = APIRouter(tags=["extra"])
 

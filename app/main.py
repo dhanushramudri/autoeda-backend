@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .database import init_db
-from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse
+from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +83,7 @@ app.include_router(sql_editor.router, prefix="/api/v1")
 app.include_router(join_builder.router, prefix="/api/v1")
 app.include_router(sources.router, prefix="/api/v1")
 app.include_router(warehouse.router, prefix="/api/v1")
+app.include_router(ai_router.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     ADMIN_EMAIL: str
     ADMIN_PASSWORD: str
+    GEMINI_API_KEY: str = ""
 
     class Config:
         env_file = ".env"
