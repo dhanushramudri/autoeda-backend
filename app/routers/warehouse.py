@@ -90,7 +90,6 @@ def _get_ready_datasets(wid: int, db: Session, load_data: bool = False) -> list[
         db.query(Dataset)
         .filter(
             Dataset.workspace_id == wid,
-            Dataset.source_type == "file",
             Dataset.status == "ready",
             or_(Dataset.file_data.isnot(None), Dataset.file_path.isnot(None)),
         )
