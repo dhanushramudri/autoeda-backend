@@ -21,12 +21,19 @@ _provider_checked = False
 
 
 def _build_provider() -> Optional[LLMProvider]:
-    if os.environ.get("OPENAI_API_KEY"):
+    # Read from pydantic settings first (covers .env via pydantic-settings),
+    # then fall back to raw os.environ for keys not declared in Settings.
+    from ..config import settings
+
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
+
+    if openai_key:
         from .providers.openai_provider import OpenAIProvider
         logger.info("AI provider: OpenAI")
         return OpenAIProvider()
 
-    if os.environ.get("GEMINI_API_KEY"):
+    if gemini_key:
         from .providers.gemini import GeminiProvider
         logger.info("AI provider: Gemini")
         return GeminiProvider()

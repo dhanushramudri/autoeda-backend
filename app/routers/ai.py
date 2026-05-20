@@ -158,3 +158,98 @@ def get_provider_info():
     """Return the active AI provider name (for UI display)."""
     from ..ai.llm import provider_name
     return {"provider": provider_name()}
+
+
+# ── NL → Transform Step ──────────────────────────────────────────────────────
+
+class NLTransformRequest(BaseModel):
+    prompt: str
+
+
+@router.post("/datasets/{dataset_id}/ai/nl-transform")
+def nl_transform(
+    dataset_id: int,
+    body: NLTransformRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = _get_ds(dataset_id, current_user, db)
+    if ds.status != "ready":
+        raise HTTPException(400, "Dataset not ready for AI operations")
+    if not body.prompt.strip():
+        raise HTTPException(422, "Prompt cannot be empty")
+
+    content_hash = ds.content_hash or ""
+    profile = get_cached_result(db, ds.id, "profile", {}, content_hash) or {}
+    columns = [c.get("name", "") for c in profile.get("columns", [])]
+    column_types = {
+        c.get("name", ""): c.get("semantic_type", "unknown")
+        for c in profile.get("columns", [])
+    }
+
+    from ..ai.nl_transform import generate_transform_step
+    try:
+        result = generate_transform_step(body.prompt, columns, column_types)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+    return result
+
+
+# ── Hypothesis Generation ─────────────────────────────────────────────────────
+
+@router.get("/datasets/{dataset_id}/ai/hypotheses")
+def get_hypotheses(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = _get_ds(dataset_id, current_user, db)
+    if ds.status != "ready":
+        return {"hypotheses": [], "source": "none", "message": "Dataset is not ready yet."}
+
+    content_hash = ds.content_hash or ""
+
+    profile = get_cached_result(db, ds.id, "profile", {}, content_hash) or {}
+    correlations = (
+        get_cached_result(db, ds.id, "correlations", {"type": "correlations", "method": "pearson"}, content_hash)
+        or {}
+    )
+    outliers = (
+        get_cached_result(db, ds.id, "outliers", {"type": "outliers", "method": "iqr", "column": None}, content_hash)
+        or {}
+    )
+
+    # Feature importance: fetch whatever target was last computed (target varies per user)
+    from ..models.dataset import EDAResult
+    fi_row = (
+        db.query(EDAResult)
+        .filter(
+            EDAResult.dataset_id == ds.id,
+            EDAResult.analysis_type == "feature_importance",
+            EDAResult.dataset_version == content_hash,
+        )
+        .order_by(EDAResult.computed_at.desc())
+        .first()
+    )
+    feature_importance: dict = {}
+    if fi_row:
+        import json as _json
+        try:
+            feature_importance = _json.loads(fi_row.result_data)
+        except Exception:
+            pass
+
+    from ..ai.hypothesis_generator import generate_hypotheses
+    cards = generate_hypotheses(
+        name=ds.name,
+        profile=profile,
+        correlations=correlations,
+        outliers=outliers,
+        feature_importance=feature_importance,
+    )
+
+    from ..ai.llm import provider_name
+    source = "ai" if provider_name() != "none" else "rules"
+
+    return {"hypotheses": cards, "source": source, "count": len(cards)}

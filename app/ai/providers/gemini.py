@@ -21,7 +21,8 @@ class GeminiProvider(LLMProvider):
         temperature: float = 0.3,
         max_tokens: int = 1024,
     ) -> Optional[str]:
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        from ...config import settings
+        api_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
         if not api_key:
             return None
         try:
