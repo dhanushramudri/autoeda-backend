@@ -10,6 +10,12 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str
     ADMIN_PASSWORD: str
     GEMINI_API_KEY: str = ""
+    AZURE_TENANT_ID: str = ""
+    AZURE_CLIENT_ID: str = ""
+    AZURE_CLIENT_SECRET: str = ""
+    SHAREPOINT_EXCEL_URL: str = ""
+    SHAREPOINT_SHEET: str = "Sheet1"
+    SHAREPOINT_TABLE: str = "FeedbackTable"
 
     class Config:
         env_file = ".env"

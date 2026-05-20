@@ -41,12 +41,35 @@ def init_db():
     from .models import (  # noqa: F401
         user, workspace, dataset, job,
         pipeline_step, column_metadata, data_quality_rule,
-        eda_run, saved_chart, named_segment, data_source,
+        eda_run, saved_chart, named_segment, data_source, feedback,
     )
     # When using Alembic this is a no-op safety net for fresh installs only.
     # Run `alembic upgrade head` for proper migrations.
     Base.metadata.create_all(bind=engine)
+    _migrate_feedback_attachments()
     _seed_admin()
+
+
+def _migrate_feedback_attachments():
+    """Add new columns to feedback table.
+
+    Uses a fresh connection per column so a PG 'transaction aborted' state
+    from an already-existing column never blocks the next ALTER TABLE.
+    """
+    from sqlalchemy import text
+    cols = [
+        ("attachment_path",  "VARCHAR(500)"),
+        ("attachment_name",  "VARCHAR(255)"),
+        ("attachments_json", "TEXT"),
+        ("subject",          "VARCHAR(255)"),
+    ]
+    for col, col_type in cols:
+        with engine.connect() as conn:
+            try:
+                conn.execute(text(f"ALTER TABLE feedback ADD COLUMN {col} {col_type}"))
+                conn.commit()
+            except Exception:
+                pass  # column already exists — safe to ignore
 
 
 def _seed_admin():

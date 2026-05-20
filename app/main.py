@@ -1,14 +1,19 @@
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# Ensure uploads directory exists before mounting
+Path("uploads").mkdir(exist_ok=True)
+
 from .database import init_db
-from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router
+from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +68,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestLoggingMiddleware)
 
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -84,6 +91,7 @@ app.include_router(join_builder.router, prefix="/api/v1")
 app.include_router(sources.router, prefix="/api/v1")
 app.include_router(warehouse.router, prefix="/api/v1")
 app.include_router(ai_router.router, prefix="/api/v1")
+app.include_router(feedback_router.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")
