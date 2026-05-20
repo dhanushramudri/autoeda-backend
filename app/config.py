@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     SHAREPOINT_EXCEL_URL: str = ""
     SHAREPOINT_SHEET: str = "Sheet1"
     SHAREPOINT_TABLE: str = "FeedbackTable"
+    # Optional — set to enable Redis-backed event bus for multi-instance deploys
+    REDIS_URL: str = ""
 
     class Config:
         env_file = ".env"

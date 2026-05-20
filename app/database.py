@@ -48,6 +48,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     _migrate_feedback_attachments()
     _seed_admin()
+    _seed_test_user()
 
 
 def _migrate_feedback_attachments():
@@ -108,6 +109,48 @@ def _seed_admin():
 
         member = WorkspaceMember(workspace_id=ws.id, user_id=admin.id, role="admin")
         db.add(member)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _seed_test_user():
+    """Create a second non-admin user for testing real-time features.
+
+    Credentials: testuser@autoeda.local / Test@1234
+    Added to every existing workspace so both users share the same workspace.
+    """
+    from .models.user import User
+    from .models.workspace import Workspace, WorkspaceMember
+    from .auth import get_password_hash
+
+    TEST_EMAIL = "testuser@autoeda.local"
+    TEST_PASSWORD = "Test@1234"
+
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.email == TEST_EMAIL).first()
+        if existing:
+            return
+
+        test_user = User(
+            email=TEST_EMAIL,
+            full_name="Test User",
+            hashed_password=get_password_hash(TEST_PASSWORD),
+            is_active=True,
+            is_admin=False,
+        )
+        db.add(test_user)
+        db.flush()
+
+        # Add to all existing workspaces
+        for ws in db.query(Workspace).all():
+            already_member = db.query(WorkspaceMember).filter_by(
+                workspace_id=ws.id, user_id=test_user.id
+            ).first()
+            if not already_member:
+                db.add(WorkspaceMember(workspace_id=ws.id, user_id=test_user.id, role="member"))
+
         db.commit()
     finally:
         db.close()

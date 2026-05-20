@@ -104,6 +104,17 @@ async def submit_feedback(
     db.add(row)
     db.commit()
     db.refresh(row)
+
+    # Notify all workspaces — feedback is workspace-agnostic
+    from ..core.event_bus import emit_nowait
+    emit_nowait("workspace:*", {
+        "_actor_id": current_user.id,
+        "type": "feedback_submitted",
+        "feedback_type": feedback_type,
+        "subject": (subject.strip() if subject else None),
+        "actor": current_user.full_name or current_user.email,
+    })
+
     return row
 
 
