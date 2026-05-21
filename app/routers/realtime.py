@@ -75,10 +75,16 @@ async def sse_stream(
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=20.0)
-                    # Never echo an event back to the actor who triggered it
-                    if event.get("_actor_id") == user.id:
-                        continue
-                    # Strip internal field before sending to client
+                    for_user_id = event.get("_for_user_id")
+                    if for_user_id is not None:
+                        # Targeted event — only deliver to the intended user
+                        if for_user_id != user.id:
+                            continue
+                    else:
+                        # Broadcast — never echo back to the actor
+                        if event.get("_actor_id") == user.id:
+                            continue
+                    # Strip internal fields before sending to client
                     payload = {k: v for k, v in event.items() if not k.startswith("_")}
                     yield f"data: {json.dumps(payload)}\n\n"
                 except asyncio.TimeoutError:

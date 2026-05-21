@@ -47,8 +47,10 @@ def init_db():
     # Run `alembic upgrade head` for proper migrations.
     Base.metadata.create_all(bind=engine)
     _migrate_feedback_attachments()
+    _migrate_feedback_comment_parent()
     _seed_admin()
     _seed_test_user()
+    _promote_jman_admins()
 
 
 def _migrate_feedback_attachments():
@@ -72,12 +74,48 @@ def _migrate_feedback_attachments():
         ("attachment_name",  "VARCHAR(255)"),
         ("attachments_json", "TEXT"),
         ("subject",          "VARCHAR(255)"),
+        ("status",           "VARCHAR(30) NOT NULL DEFAULT 'open'"),
     ]
     for col, col_type in cols:
         if col not in existing:
             with engine.connect() as conn:
                 conn.execute(text(f"ALTER TABLE feedback ADD COLUMN {col} {col_type}"))
                 conn.commit()
+
+
+def _migrate_feedback_comment_parent():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("feedback_comments")}
+    except Exception:
+        return
+
+    if "parent_id" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE feedback_comments ADD COLUMN parent_id INTEGER REFERENCES feedback_comments(id) ON DELETE CASCADE"))
+            conn.commit()
+
+
+def _promote_jman_admins():
+    """Ensure specific @jmangroup.com accounts are always admins."""
+    from .models.user import User
+
+    ADMIN_EMAILS = {
+        "admin@jmangroup.com",
+        "autoeda@jmangroup.com",
+        "dhanush.r@jmangroup.com",
+    }
+    db = SessionLocal()
+    try:
+        for email in ADMIN_EMAILS:
+            user = db.query(User).filter(User.email == email).first()
+            if user and not user.is_admin:
+                user.is_admin = True
+        db.commit()
+    finally:
+        db.close()
 
 
 def _seed_admin():

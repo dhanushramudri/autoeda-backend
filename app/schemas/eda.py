@@ -75,9 +75,18 @@ class OutlierResult(BaseModel):
 class FeatureImportanceResult(BaseModel):
     target: str
     problem_type: str
+    n_samples: int = 0
+    n_features: int = 0
+    model_score: Optional[float] = None
+    class_distribution: Optional[dict[str, Any]] = None
     importances: list[dict[str, Any]]
     mutual_info: list[dict[str, Any]]
     correlations: list[dict[str, Any]]
+    anova: list[dict[str, Any]] = []
+    feature_meta: list[dict[str, Any]] = []
+    top_features: list[str] = []
+    drop_candidates: list[str] = []
+    warnings: list[dict[str, Any]] = []
     error: Optional[str] = None
 
 
