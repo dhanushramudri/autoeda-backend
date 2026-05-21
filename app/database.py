@@ -52,12 +52,21 @@ def init_db():
 
 
 def _migrate_feedback_attachments():
-    """Add new columns to feedback table.
+    """Add new columns to feedback table only if they are missing.
 
-    Uses a fresh connection per column so a PG 'transaction aborted' state
-    from an already-existing column never blocks the next ALTER TABLE.
+    Checks column existence via the inspector first — this avoids running
+    ALTER TABLE (which acquires an ACCESS EXCLUSIVE lock) on every startup
+    when the columns already exist, preventing the startup hang that causes
+    all incoming requests to queue as pending.
     """
-    from sqlalchemy import text
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("feedback")}
+    except Exception:
+        return  # feedback table doesn't exist yet — create_all will handle it
+
     cols = [
         ("attachment_path",  "VARCHAR(500)"),
         ("attachment_name",  "VARCHAR(255)"),
@@ -65,12 +74,10 @@ def _migrate_feedback_attachments():
         ("subject",          "VARCHAR(255)"),
     ]
     for col, col_type in cols:
-        with engine.connect() as conn:
-            try:
+        if col not in existing:
+            with engine.connect() as conn:
                 conn.execute(text(f"ALTER TABLE feedback ADD COLUMN {col} {col_type}"))
                 conn.commit()
-            except Exception:
-                pass  # column already exists — safe to ignore
 
 
 def _seed_admin():
