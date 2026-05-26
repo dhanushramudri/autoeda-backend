@@ -104,7 +104,7 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
     for col in X.select_dtypes(include="object").columns:
         X[col] = LabelEncoder().fit_transform(X[col].astype(str))
     X = X.select_dtypes(include=np.number)
-    X = X.fillna(X.median())
+    X = X.astype(np.float32)
 
     n_features = len(X.columns)
 
@@ -129,9 +129,10 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
     model_score = None
     try:
         clf = (
-            RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1, oob_score=True)
+            RandomForestClassifier(n_estimators=25,max_depth=10,
+ random_state=42, n_jobs=1, oob_score=True)
             if problem_type == "classification"
-            else RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1, oob_score=True)
+            else RandomForestRegressor(n_estimators=25, random_state=42, n_jobs=1, oob_score=True)
         )
         clf.fit(X, y_aligned)
         model_score = round(float(clf.oob_score_), 4)
