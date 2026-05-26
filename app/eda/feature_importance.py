@@ -16,13 +16,39 @@ def _uniform_threshold(n_features: int) -> float:
 
 def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
     empty = {
-        "target": target, "problem_type": "unknown",
-        "n_samples": 0, "n_features": 0,
-        "model_score": None, "class_distribution": None,
-        "importances": [], "mutual_info": [], "correlations": [],
-        "anova": [], "feature_meta": [],
-        "top_features": [], "drop_candidates": [], "warnings": [],
-    }
+    "target": target,
+    "problem_type": "unknown",
+    "n_samples": 0,
+    "n_features": 0,
+
+    "model_score": None,
+    "cv_score_mean": None,
+    "cv_score_std": None,
+
+    "class_distribution": None,
+
+    "importances": [],
+    "permutation_importances": [],
+
+    "mutual_info": [],
+    "correlations": [],
+    "anova": [],
+
+    "shap_values": [],
+
+    "feature_meta": [],
+
+    "stability": [],
+    "interactions": [],
+
+    "top_features": [],
+    "drop_candidates": [],
+
+    "warnings": [],
+
+    "redundant_groups": [],
+    "leakage_suspects": [],
+}
 
     if target not in df.columns:
         return {**empty, "error": f"Column '{target}' not found"}
@@ -270,18 +296,41 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
         })
 
     return {
-        "target":             target,
-        "problem_type":       problem_type,
-        "n_samples":          n_samples,
-        "n_features":         n_features,
-        "model_score":        model_score,
-        "class_distribution": class_distribution,
-        "importances":        rf_importances[:20],
-        "mutual_info":        mi_scores[:20],
-        "correlations":       correlations[:20],
-        "anova":              anova[:20],
-        "feature_meta":       feature_meta[:30],
-        "top_features":       top_features,
-        "drop_candidates":    drop_candidates,
-        "warnings":           warnings_list,
-    }
+    "target": target,
+    "problem_type": problem_type,
+    "n_samples": n_samples,
+    "n_features": n_features,
+
+    "model_score": model_score,
+
+    "cv_score_mean": None,
+    "cv_score_std": None,
+
+    "class_distribution": class_distribution,
+
+    "importances": rf_importances[:20],
+
+    # ADD THIS
+    "permutation_importances": [],
+
+    "mutual_info": mi_scores[:20],
+
+    "correlations": correlations[:20],
+
+    "anova": anova[:20],
+
+    "shap_values": [],
+
+    "feature_meta": feature_meta[:30],
+
+    "stability": [],
+    "interactions": [],
+
+    "top_features": top_features,
+    "drop_candidates": drop_candidates,
+
+    "warnings": warnings_list,
+
+    "redundant_groups": [],
+    "leakage_suspects": [],
+}
