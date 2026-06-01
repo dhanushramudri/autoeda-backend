@@ -614,49 +614,24 @@ def validate_assumption(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ) -> AssumptionValidationResponse:
-    """
-    Validate a user-provided assumption against EDA results.
-
-    Returns verdict, evidence, confidence level, and status (supported|refuted|inconclusive).
-    """
-    from ..ai.assumption_validator import validate_assumption
-    from ..eda.profiler import profile as run_profile
-    from ..eda.correlations import compute_correlations
-    from ..eda.outliers import compute_outliers
-    from ..eda.feature_importance import compute_feature_importance
-
-    # Get dataset
+    from ..ai.assumption_validator import validate_assumption as _validate
+    
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
     _assert_member(ds.workspace_id, current_user, db)
 
-    # Load data
-    try:
-        df = _load_dataset_df(ds)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load dataset: {str(e)}")
+    # ── Read cached EDA results (same as hypotheses endpoint) ──
+    profile      = json.loads(ds.profile_data or "{}") if hasattr(ds, "profile_data") else {}
+    correlations = json.loads(ds.correlations_data or "{}") if hasattr(ds, "correlations_data") else {}
+    outliers     = json.loads(ds.outliers_data or "{}") if hasattr(ds, "outliers_data") else {}
+    feature_importance = json.loads(ds.feature_importance_data or "{}") if hasattr(ds, "feature_importance_data") else {}
 
-    # Compute EDA results
-    try:
-        profile = run_profile(df)
-        correlations = compute_correlations(df, method="pearson")
-        outliers = compute_outliers(df, method="iqr")
-
-        # Feature importance — only if target is clear (optional)
-        feature_importance = {"importances": [], "target": ""}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to compute EDA: {str(e)}")
-
-    # Validate assumption
-    result = validate_assumption(
+    result = _validate(
         assumption=request.assumption,
         profile=profile,
         correlations=correlations,
         outliers=outliers,
         feature_importance=feature_importance,
     )
-
     return AssumptionValidationResponse(**result)
