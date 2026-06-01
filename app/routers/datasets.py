@@ -587,3 +587,76 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
         return CloudConnector().load_data(config, limit=limit)
     else:
         raise ValueError(f"Unsupported source_type: {ds.source_type}")
+
+
+# ── Assumption Validation ──────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+
+
+class AssumptionValidationRequest(BaseModel):
+    assumption: str
+    source: str = "user"  # "user" | "business_context" | "client_kt" | "user_intuition"
+
+
+class AssumptionValidationResponse(BaseModel):
+    verdict: str
+    evidence: str
+    confidence: str
+    status: str
+    columns: list[str]
+
+
+@router.post("/datasets/{dataset_id}/assumptions/validate")
+def validate_assumption(
+    dataset_id: int,
+    request: AssumptionValidationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+) -> AssumptionValidationResponse:
+    """
+    Validate a user-provided assumption against EDA results.
+
+    Returns verdict, evidence, confidence level, and status (supported|refuted|inconclusive).
+    """
+    from ..ai.assumption_validator import validate_assumption
+    from ..eda.profiler import profile as run_profile
+    from ..eda.correlations import compute_correlations
+    from ..eda.outliers import compute_outliers
+    from ..eda.feature_importance import compute_feature_importance
+
+    # Get dataset
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    _assert_member(ds.workspace_id, current_user, db)
+
+    # Load data
+    try:
+        df = _load_dataset_df(ds)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load dataset: {str(e)}")
+
+    # Compute EDA results
+    try:
+        profile = run_profile(df)
+        correlations = compute_correlations(df, method="pearson")
+        outliers = compute_outliers(df, method="iqr")
+
+        # Feature importance — only if target is clear (optional)
+        feature_importance = {"importances": [], "target": ""}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to compute EDA: {str(e)}")
+
+    # Validate assumption
+    result = validate_assumption(
+        assumption=request.assumption,
+        profile=profile,
+        correlations=correlations,
+        outliers=outliers,
+        feature_importance=feature_importance,
+    )
+
+    return AssumptionValidationResponse(**result)
