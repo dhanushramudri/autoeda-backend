@@ -7,7 +7,7 @@ from sklearn.feature_selection import (
     f_classif, f_regression,
 )
 from sklearn.preprocessing import LabelEncoder
-
+from sklearn.inspection import permutation_importance
 
 def _uniform_threshold(n_features: int) -> float:
     """Importance level a feature would have if all were equally important."""
@@ -295,6 +295,43 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
             "message": f"{len(drop_candidates)} feature(s) score low on all methods and could be dropped: {', '.join(drop_candidates[:3])}{'…' if len(drop_candidates) > 3 else ''}",
             "level": "info",
         })
+    
+    perm_importances: list[dict] = []
+    try:
+        perm_result = permutation_importance(
+            clf, X, y_aligned, n_repeats=5, random_state=42, n_jobs=1
+        )
+        for feat, imp, std in zip(X.columns, perm_result.importances_mean, perm_result.importances_std):
+            perm_importances.append({
+                "feature": str(feat),
+                "importance": round(float(imp), 6),
+                "std": round(float(std), 6),
+            })
+        perm_importances.sort(key=lambda x: x["importance"], reverse=True)
+    except Exception:
+        pass
+
+
+    shap_values_list: list[dict] = []
+    try:
+        import shap
+        explainer = shap.TreeExplainer(clf)
+        shap_vals = explainer.shap_values(X)
+        # For classifiers shap_values returns a list (one per class), take mean abs across all classes
+        if isinstance(shap_vals, list):
+            import numpy as np as _np
+            shap_arr = _np.mean([_np.abs(s) for s in shap_vals], axis=0)
+        else:
+            shap_arr = _np.abs(shap_vals)
+        mean_shap = shap_arr.mean(axis=0)
+        for feat, val in zip(X.columns, mean_shap):
+            shap_values_list.append({
+                "feature": str(feat),
+                "mean_abs_shap": round(float(val), 6),
+            })
+        shap_values_list.sort(key=lambda x: x["mean_abs_shap"], reverse=True)
+    except Exception:
+        pass
 
     return {
     "target": target,
@@ -310,7 +347,7 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
     "class_distribution": class_distribution,
 
     "importances": rf_importances[:20],
-    "permutation_importances": [],
+    "permutation_importances": perm_importances[:20],
 
 
     "mutual_info": mi_scores[:20],
@@ -318,7 +355,7 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
     "correlations": correlations[:20],
 
     "anova": anova[:20],
-    "shap_values": [],
+    "shap_values": shap_values_list[:20],
 
 
     "feature_meta": feature_meta[:30],
