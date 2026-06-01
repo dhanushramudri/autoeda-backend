@@ -1,7 +1,9 @@
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing 
+from decimal import Decimal
+
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -40,6 +42,36 @@ def _clean_dataframe_for_json(df) -> None:
     for col in df.columns:
         if df[col].dtype in ('float64', 'float32', 'float16'):
             df[col] = df[col].where(~(np.isnan(df[col]) | np.isinf(df[col])), None)
+        elif df[col].dtype == 'object':
+            # object columns can contain float NaN too
+            df[col] = df[col].apply(
+                lambda v: None if isinstance(v, float) and (np.isnan(v) or np.isinf(v)) else v
+            )
+
+def _sanitize_row(row) -> list:
+    """Sanitize a single row's values for JSON safety."""
+    result = []
+    for v in row:
+        if v is None:
+            result.append(None)
+        elif isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+            result.append(None)
+        elif isinstance(v, Decimal):        
+            result.append(float(v)) 
+        elif isinstance(v, Decimal):
+            result.append(float(v))
+        elif isinstance(v, (np.integer,)):
+            result.append(int(v))
+        elif isinstance(v, (np.floating,)):
+            result.append(None if (np.isnan(v) or np.isinf(v)) else float(v))
+        elif isinstance(v, (pd.Timestamp, np.datetime64)):
+            result.append(str(v))
+        elif isinstance(v, np.bool_):
+            result.append(bool(v))
+        else:
+            result.append(v)
+    return result
+
 
 # ── Simple XOR-based obfuscation (no extra deps needed) ────────────────────────
 _SECRET = (os.getenv("SECRET_KEY") or "autoeda-secret-key-change-in-prod").encode()
@@ -332,12 +364,15 @@ def preview_source(
             cfg["query"] = None
         df = connector.load_data(cfg, limit=rows)
 
-        # Clean NaN/inf values for JSON serialization
+        # Clean NaN/inf in-place first
         _clean_dataframe_for_json(df)
+
+        # Then sanitize each row value individually as a safety net
+        sanitized_rows = [_sanitize_row(r) for r in df.itertuples(index=False)]
 
         return {
             "columns": list(df.columns),
-            "rows": [list(r) for r in df.itertuples(index=False)],
+            "rows": sanitized_rows,
             "row_count": len(df),
         }
     except Exception as exc:
@@ -362,6 +397,9 @@ def import_as_dataset(
     try:
         connector = get_connector(src.source_type)
         cfg = _build_connector_config(src)
+        if body.table:
+            cfg["table"] = body.table
+            cfg["query"] = None
         df = connector.load_data(cfg, limit=body.limit)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to load data: {exc}")
