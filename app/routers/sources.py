@@ -6,6 +6,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+import numpy as np
+import pandas as pd
 
 from ..database import get_db
 from ..auth import get_current_active_user
@@ -14,6 +16,30 @@ from ..models.data_source import DataSource
 from ..connectors.registry import get_connector, SOURCE_CATALOG
 
 router = APIRouter(tags=["sources"])
+
+# ── JSON serialization helper for NaN values ───────────────────────────────────
+
+def _clean_for_json(val: Any) -> Any:
+    """Convert NaN, infinity, and pandas types to JSON-safe values."""
+    if val is None:
+        return None
+    if isinstance(val, float):
+        if np.isnan(val) or np.isinf(val):
+            return None
+    if isinstance(val, (np.integer, np.floating)):
+        if isinstance(val, np.floating) and (np.isnan(val) or np.isinf(val)):
+            return None
+        return val.item()  # Convert numpy scalar to Python scalar
+    if isinstance(val, (pd.Timestamp, np.datetime64)):
+        return str(val)
+    return val
+
+
+def _clean_dataframe_for_json(df) -> None:
+    """In-place conversion of NaN/inf values in dataframe to None for JSON serialization."""
+    for col in df.columns:
+        if df[col].dtype in ('float64', 'float32', 'float16'):
+            df[col] = df[col].where(~(np.isnan(df[col]) | np.isinf(df[col])), None)
 
 # ── Simple XOR-based obfuscation (no extra deps needed) ────────────────────────
 _SECRET = (os.getenv("SECRET_KEY") or "autoeda-secret-key-change-in-prod").encode()
@@ -305,6 +331,10 @@ def preview_source(
             cfg["table"] = table
             cfg["query"] = None
         df = connector.load_data(cfg, limit=rows)
+
+        # Clean NaN/inf values for JSON serialization
+        _clean_dataframe_for_json(df)
+
         return {
             "columns": list(df.columns),
             "rows": [list(r) for r in df.itertuples(index=False)],
@@ -335,6 +365,9 @@ def import_as_dataset(
         df = connector.load_data(cfg, limit=body.limit)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to load data: {exc}")
+
+    # Clean NaN/inf values before saving to parquet
+    _clean_dataframe_for_json(df)
 
     # Save as parquet in uploads dir
     uploads_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
