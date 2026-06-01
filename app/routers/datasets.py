@@ -606,7 +606,6 @@ class AssumptionValidationResponse(BaseModel):
     status: str
     columns: list[str]
 
-
 @router.post("/datasets/{dataset_id}/assumptions/validate")
 def validate_assumption(
     dataset_id: int,
@@ -615,17 +614,47 @@ def validate_assumption(
     current_user: User = Depends(get_current_active_user),
 ) -> AssumptionValidationResponse:
     from ..ai.assumption_validator import validate_assumption as _validate
-    
+    from ..cache import get_cached_result
+    from ..models.dataset import EDAResult
+
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
     _assert_member(ds.workspace_id, current_user, db)
 
-    # ── Read cached EDA results (same as hypotheses endpoint) ──
-    profile      = json.loads(ds.profile_data or "{}") if hasattr(ds, "profile_data") else {}
-    correlations = json.loads(ds.correlations_data or "{}") if hasattr(ds, "correlations_data") else {}
-    outliers     = json.loads(ds.outliers_data or "{}") if hasattr(ds, "outliers_data") else {}
-    feature_importance = json.loads(ds.feature_importance_data or "{}") if hasattr(ds, "feature_importance_data") else {}
+    if ds.status != "ready":
+        raise HTTPException(status_code=400, detail="Dataset is not ready yet.")
+
+    # ── Exact same cache reads as the hypotheses endpoint ──────────────────
+    content_hash = ds.content_hash or ""
+
+    profile = get_cached_result(db, ds.id, "profile", {}, content_hash) or {}
+    correlations = (
+        get_cached_result(db, ds.id, "correlations", {"type": "correlations", "method": "pearson"}, content_hash)
+        or {}
+    )
+    outliers = (
+        get_cached_result(db, ds.id, "outliers", {"type": "outliers", "method": "iqr", "column": None}, content_hash)
+        or {}
+    )
+
+    # Feature importance — same as hypotheses: fetch latest computed target
+    fi_row = (
+        db.query(EDAResult)
+        .filter(
+            EDAResult.dataset_id == ds.id,
+            EDAResult.analysis_type == "feature_importance",
+            EDAResult.dataset_version == content_hash,
+        )
+        .order_by(EDAResult.computed_at.desc())
+        .first()
+    )
+    feature_importance: dict = {}
+    if fi_row:
+        try:
+            feature_importance = json.loads(fi_row.result_data)
+        except Exception:
+            pass
 
     result = _validate(
         assumption=request.assumption,
