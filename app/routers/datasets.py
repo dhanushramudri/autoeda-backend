@@ -606,6 +606,8 @@ class AssumptionValidationResponse(BaseModel):
     status: str
     columns: list[str]
 
+
+
 @router.post("/datasets/{dataset_id}/assumptions/validate")
 def validate_assumption(
     dataset_id: int,
@@ -625,26 +627,40 @@ def validate_assumption(
     if ds.status != "ready":
         raise HTTPException(status_code=400, detail="Dataset is not ready yet.")
 
-    # ── Exact same cache reads as the hypotheses endpoint ──────────────────
     content_hash = ds.content_hash or ""
 
-    profile = get_cached_result(db, ds.id, "profile", {}, content_hash) or {}
-    correlations = (
-        get_cached_result(db, ds.id, "correlations", {"type": "correlations", "method": "pearson"}, content_hash)
-        or {}
-    )
-    outliers = (
-        get_cached_result(db, ds.id, "outliers", {"type": "outliers", "method": "iqr", "column": None}, content_hash)
-        or {}
-    )
+    def _get_latest(analysis_type: str, params: dict) -> dict:
+        """Try exact cache match first, fall back to latest row for this dataset."""
+        result = get_cached_result(db, ds.id, analysis_type, params, content_hash)
+        if result:
+            return result
+        # Fallback: ignore version/params mismatch, just get the most recent result
+        row = (
+            db.query(EDAResult)
+            .filter(
+                EDAResult.dataset_id == ds.id,
+                EDAResult.analysis_type == analysis_type,
+            )
+            .order_by(EDAResult.computed_at.desc())
+            .first()
+        )
+        if row:
+            try:
+                return json.loads(row.result_data)
+            except Exception:
+                pass
+        return {}
 
-    # Feature importance — same as hypotheses: fetch latest computed target
+    profile      = _get_latest("profile", {})
+    correlations = _get_latest("correlations", {"type": "correlations", "method": "pearson"})
+    outliers     = _get_latest("outliers", {"type": "outliers", "method": "iqr", "column": None})
+
+    # Feature importance — latest computed, any target
     fi_row = (
         db.query(EDAResult)
         .filter(
             EDAResult.dataset_id == ds.id,
             EDAResult.analysis_type == "feature_importance",
-            EDAResult.dataset_version == content_hash,
         )
         .order_by(EDAResult.computed_at.desc())
         .first()
@@ -655,6 +671,12 @@ def validate_assumption(
             feature_importance = json.loads(fi_row.result_data)
         except Exception:
             pass
+
+    if not profile.get("total_rows") or not profile.get("total_columns"):
+        raise HTTPException(
+            status_code=400,
+            detail="Dataset profile not found. Please run EDA first before validating assumptions."
+        )
 
     result = _validate(
         assumption=request.assumption,
