@@ -558,7 +558,7 @@ def export_dataset(
 
 def _load_dataset_df(ds: Dataset, limit: int = None):
     import os
-    from ..connectors.file_connector import FileConnector, load_from_bytes
+    from ..connectors.file_connector import load_from_bytes
     from ..connectors.db_connector import DBConnector
     from ..connectors.api_connector import RESTAPIConnector
     from ..connectors.cloud_connector import CloudConnector
@@ -566,14 +566,11 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
+        if not ds.file_data:
+            raise HTTPException(status_code=400, detail=f"Dataset {ds.id} has no file data in database")
         filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-        if ds.file_data:
-            return load_from_bytes(ds.file_data, filename, config)
-        elif ds.file_path and os.path.exists(ds.file_path):
-            config["file_path"] = ds.file_path
-            return FileConnector().load_data(config, limit=limit)
-        else:
-            raise HTTPException(status_code=400, detail=f"Dataset {ds.id} has no accessible file data")
+        # Use database bytes only (file-based data stored in DB)
+        return load_from_bytes(ds.file_data, filename, config)
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config, limit=limit)

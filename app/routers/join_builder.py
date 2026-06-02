@@ -107,19 +107,16 @@ def _load_dataset_df(dataset_id: Union[str, int], db: Session):
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 
     import json
-    from ..connectors.file_connector import FileConnector, load_from_bytes
+    from ..connectors.file_connector import load_from_bytes
 
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
+        if not ds.file_data:
+            raise HTTPException(status_code=400, detail=f"Dataset {dataset_id} has no accessible file data")
         filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-        if ds.file_path and os.path.exists(ds.file_path):
-            config["file_path"] = ds.file_path
-            return FileConnector().load_data(config)
-        elif ds.file_data:
-            return load_from_bytes(ds.file_data, filename, config)
-        else:
-            raise HTTPException(status_code=400, detail=f"Dataset {dataset_id} has no accessible file")
+        # Use database bytes only (file-based data stored in DB)
+        return load_from_bytes(ds.file_data, filename, config)
     else:
         # DB / API connectors — load via tasks helper
         from ..connectors.db_connector import DBConnector

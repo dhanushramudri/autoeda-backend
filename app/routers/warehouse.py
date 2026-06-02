@@ -45,20 +45,17 @@ def _load_duckdb():
 def _register_dataset(con, view_name: str, ds: Dataset):
     """Register a dataset as a DuckDB view — always loads from DB bytes, never disk."""
     import os
-    from ..connectors.file_connector import FileConnector, load_from_bytes
+    from ..connectors.file_connector import load_from_bytes
     import json
 
     config = json.loads(ds.source_config or "{}")
+    
+    if not ds.file_data:
+        raise ValueError(f"Dataset '{ds.name}' has no file data in database")
+    
     filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-
-    if ds.file_data:
-        df = load_from_bytes(ds.file_data, filename, config)
-    elif ds.file_path and os.path.exists(ds.file_path):
-        config["file_path"] = ds.file_path
-        df = FileConnector().load_data(config)
-    else:
-        raise ValueError(f"Dataset '{ds.name}' has no accessible file data")
-
+    # Use database bytes only (file-based data stored in DB)
+    df = load_from_bytes(ds.file_data, filename, config)
     con.register(view_name, df)
 
 
