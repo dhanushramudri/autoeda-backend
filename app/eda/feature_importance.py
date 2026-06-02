@@ -317,12 +317,10 @@ def run_feature_importance(df: pd.DataFrame, target: str) -> dict:
         import shap
         explainer = shap.TreeExplainer(clf)
         shap_vals = explainer.shap_values(X)
-        # For classifiers shap_values returns a list (one per class), take mean abs across all classes
         if isinstance(shap_vals, list):
-            import numpy as np as _np
-            shap_arr = _np.mean([_np.abs(s) for s in shap_vals], axis=0)
+            shap_arr = np.mean([np.abs(s) for s in shap_vals], axis=0)
         else:
-            shap_arr = _np.abs(shap_vals)
+            shap_arr = np.abs(shap_vals)
         mean_shap = shap_arr.mean(axis=0)
         for feat, val in zip(X.columns, mean_shap):
             shap_values_list.append({
