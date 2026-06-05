@@ -525,39 +525,8 @@ def run_full_analysis(df: pd.DataFrame) -> dict:
     cat_cols = [c for c, t in col_types.items() if t in ("categorical", "boolean")]
     dt_cols = [c for c, t in col_types.items() if t == "datetime"]
 
-    # ── Per-numeric-column charts ─────────────────────────────────────────────
-    numeric_charts: dict[str, dict] = {}
-    for col in num_cols:
-        s = df_sample[col]
-        charts: dict[str, Any] = {}
-        charts["histogram_kde"] = _histogram_kde(s)
-        charts["box"] = _box_stats(s)
-        charts["violin"] = _violin_kde(s)
-        charts["qq"] = _qq_plot(s)
-        charts["ecdf"] = _ecdf(s)
-        norm = _normality_test(s.dropna())
-        charts["normality"] = norm
-        charts["skewness"] = _safe(float(s.skew())) if s.dropna().shape[0] >= 3 else None
-        charts["kurtosis"] = _safe(float(s.kurtosis())) if s.dropna().shape[0] >= 4 else None
-        numeric_charts[col] = charts
-
-    # ── Per-categorical-column charts ─────────────────────────────────────────
-    categorical_charts: dict[str, dict] = {}
-    for col in cat_cols:
-        s = df_sample[col].dropna()
-        charts = {}
-        charts["bar"] = _bar_chart(s)
-        charts["pie"] = _pie_data(s)
-        charts["pareto"] = _pareto_data(s)
-        categorical_charts[col] = charts
-
-    # ── Per-datetime-column charts ────────────────────────────────────────────
-    datetime_charts: dict[str, dict] = {}
-    for col in dt_cols:
-        charts = {}
-        charts["timeseries"] = _timeseries_data(df_sample, col)
-        charts["seasonality"] = _seasonality(df_sample, col)
-        datetime_charts[col] = charts
+    # ── Per-column charts are now lazy-loaded via /analysis/column/{col_name} endpoint
+    # Skeleton only — no per-column data computed here
 
     # ── Multi-column analyses ─────────────────────────────────────────────────
     multi = {}
@@ -592,9 +561,6 @@ def run_full_analysis(df: pd.DataFrame) -> dict:
         "numeric_cols": num_cols,
         "categorical_cols": cat_cols,
         "datetime_cols": dt_cols,
-        "numeric_charts": numeric_charts,
-        "categorical_charts": categorical_charts,
-        "datetime_charts": datetime_charts,
         "multi_column": multi,
         "missing_charts": missing_charts,
         "stat_cards": stat_cards,
