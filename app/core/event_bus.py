@@ -112,10 +112,7 @@ class _RedisBus:
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 def _build(redis_url: Optional[str]):
-    if redis_url:
-        logger.info("EventBus → Redis (%s)", redis_url)
-        return _RedisBus(redis_url)
-    logger.info("EventBus → in-memory")
+    logger.info("EventBus → in-memory (Redis disabled)")
     return _InMemoryBus()
 
 
