@@ -103,7 +103,7 @@ def _promote_jman_admins():
     """Ensure specific @jmangroup.com accounts are always admins."""
     from .models.user import User
 
-    ADMIN_EMAILS = set(settings.ADMIN_EMAILS) if settings.ADMIN_EMAILS else {
+    ADMIN_EMAILS = set(settings.admin_emails_list) if settings.ADMIN_EMAILS else {
         "admin@jmangroup.com",
         "autoeda@jmangroup.com",
         "dhanush.r@jmangroup.com",
@@ -197,7 +197,7 @@ def _seed_microsoft_emails():
 
     db = SessionLocal()
     try:
-        for email in settings.MICROSOFT_EMAILS:
+        for email in settings.microsoft_emails_list:
             existing = db.query(User).filter(User.email == email).first()
             if existing:
                 continue
