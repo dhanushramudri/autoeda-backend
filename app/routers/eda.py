@@ -44,7 +44,7 @@ def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) ->
 def _load_df(ds: Dataset):
     import os
     import pandas as pd
-    from ..connectors.file_connector import load_from_bytes
+    from ..connectors.file_connector import FileConnector, load_from_bytes
     from ..connectors.db_connector import DBConnector
     from ..connectors.api_connector import RESTAPIConnector
     from ..connectors.cloud_connector import CloudConnector
@@ -52,11 +52,15 @@ def _load_df(ds: Dataset):
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
-        if not ds.file_data:
-            raise FileNotFoundError(f"No file data available for dataset {ds.id}")
         filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-        # Use database bytes only (file-based data stored in DB)
-        return load_from_bytes(ds.file_data, filename, config)
+        # Use local disk if available (fast), fall back to DB bytes
+        if ds.file_path and os.path.exists(ds.file_path):
+            config["file_path"] = ds.file_path
+            return FileConnector().load_data(config)
+        elif ds.file_data:
+            return load_from_bytes(ds.file_data, filename, config)
+        else:
+            raise FileNotFoundError(f"No file data available for dataset {ds.id}")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config)
@@ -88,9 +92,9 @@ def get_profile(
         df = _load_df(ds)
         from ..eda.profiler import run_profile
         result = run_profile(df)
-        # Use file_size_bytes from database instead of disk
-        if ds.file_size_bytes:
-            result["file_size_bytes"] = ds.file_size_bytes
+        if ds.file_path:
+            import os
+            result["file_size_bytes"] = os.path.getsize(ds.file_path)
         store_result(db, dataset_id, "profile", cache_key, result, ds.content_hash or "")
         return ProfileResult(**result)
     except Exception as e:
@@ -152,17 +156,17 @@ def get_correlations(
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "correlations", "method": method}
+    cache_key = {"type": "correlations", "method": method,"v": 2}
     cached = get_cached_result(db, dataset_id, "correlations", cache_key, ds.content_hash or "")
     if cached:
-        return CorrelationResult(**cached)
+        return CorrelationResult.model_validate(cached)
 
     try:
         df = _load_df(ds)
         from ..eda.correlations import run_correlations
         result = run_correlations(df, method)
         store_result(db, dataset_id, "correlations", cache_key, result, ds.content_hash or "")
-        return CorrelationResult(**result)
+        return CorrelationResult.model_validate(result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -191,28 +195,133 @@ def get_outliers(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# This replaces the existing get_feature_importance endpoint in routes/eda.py
+
 @router.get("/{dataset_id}/feature-importance", response_model=FeatureImportanceResult)
 def get_feature_importance(
     dataset_id: int,
     target: str,
+    methods: str | None = None,  # NEW: comma-separated list of methods to compute
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """
+    Get feature importance with lazy loading support.
+    
+    Query params:
+    - target: Column name to analyze
+    - methods: Optional comma-separated list of methods to compute.
+      Default (None): Only compute 'rf' and 'metadata' for fast initial load.
+      Available: rf, correlation, mi, anova, permutation, shap, stability, interactions
+      Example: ?target=price&methods=rf,mi,correlation,permutation
+    """
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "feature_importance", "target": target}
-    cached = get_cached_result(db, dataset_id, "feature_importance", cache_key, ds.content_hash or "")
+    
+    if methods:
+        methods_list = [m.strip().lower() for m in methods.split(",")]
+    else:
+        methods_list = ["rf", "metadata"]
+    
+    cache_key = {
+        "type": "feature_importance",
+        "target": target,
+        "methods": sorted(methods_list),  # Normalize order for cache consistency
+    }
+    
+    cached = get_cached_result(
+        db, dataset_id, "feature_importance",
+        cache_key, ds.content_hash or ""
+    )
+    
     if cached:
         return FeatureImportanceResult(**cached)
 
     try:
         df = _load_df(ds)
         from ..eda.feature_importance import run_feature_importance
-        result = run_feature_importance(df, target)
-        store_result(db, dataset_id, "feature_importance", cache_key, result, ds.content_hash or "")
+        
+        result = run_feature_importance(df, target, methods=methods_list)
+        
+        store_result(
+            db, dataset_id, "feature_importance",
+            cache_key, result, ds.content_hash or ""
+        )
         return FeatureImportanceResult(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# NEW ENDPOINT: Get available methods and their estimated compute time
+@router.get("/{dataset_id}/feature-importance-methods")
+def get_feature_importance_methods(
+    dataset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get list of available importance methods with estimated compute times.
+    Useful for building UI progress indicators.
+    """
+    return {
+        "methods": [
+            {
+                "id": "rf",
+                "name": "Random Forest",
+                "description": "Impurity-based importance (fastest)",
+                "estimated_time_seconds": 10,
+                "default": True,
+            },
+            {
+                "id": "correlation",
+                "name": "Correlation",
+                "description": "Pearson correlation with target",
+                "estimated_time_seconds": 5,
+                "default": False,
+            },
+            {
+                "id": "mi",
+                "name": "Mutual Information",
+                "description": "Non-linear statistical dependency",
+                "estimated_time_seconds": 20,
+                "default": False,
+            },
+            {
+                "id": "anova",
+                "name": "ANOVA F-score",
+                "description": "F-statistic for feature groups",
+                "estimated_time_seconds": 15,
+                "default": False,
+            },
+            {
+                "id": "permutation",
+                "name": "Permutation Importance",
+                "description": "Feature shuffle impact on performance",
+                "estimated_time_seconds": 60,
+                "default": False,
+            },
+            {
+                "id": "shap",
+                "name": "SHAP Values",
+                "description": "Shapley value attribution (slowest)",
+                "estimated_time_seconds": 120,
+                "default": False,
+            },
+            {
+                "id": "stability",
+                "name": "Stability Analysis",
+                "description": "Bootstrap importance stability",
+                "estimated_time_seconds": 45,
+                "default": False,
+            },
+            {
+                "id": "interactions",
+                "name": "Feature Interactions",
+                "description": "Synergistic feature pairs",
+                "estimated_time_seconds": 30,
+                "default": False,
+            },
+        ]
+    }
 
 @router.get("/{dataset_id}/timeseries", response_model=TimeSeriesResult)
 def get_timeseries(

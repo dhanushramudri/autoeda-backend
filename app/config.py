@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -9,6 +10,15 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     ADMIN_EMAIL: str
     ADMIN_PASSWORD: str
+    ADMIN_EMAILS: list[str] = []
+    MICROSOFT_EMAILS: list[str] = []
+
+    @field_validator("ADMIN_EMAILS", "MICROSOFT_EMAILS", mode="before")
+    def _split_email_list(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
     GEMINI_API_KEY: str = ""
     AZURE_TENANT_ID: str = ""
     AZURE_CLIENT_ID: str = ""

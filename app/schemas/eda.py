@@ -1,5 +1,6 @@
 from typing import Any, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
 
 
 class ColumnProfile(BaseModel):
@@ -57,12 +58,57 @@ class DistributionResult(BaseModel):
     error: Optional[str] = None
 
 
+
+class CorrelationColumnProfile(BaseModel):
+    num_cols:     list[str] = []
+    cat_cols:     list[str] = []
+    ignored_cols: list[str] = []
+    skipped_cols:    list[str]       = []               
+    cat_cardinality: dict[str, int]  = {}    
+
+
+class CatPair(BaseModel):
+    col1:      str
+    col2:      str
+    cramers_v: float
+
+
+class MixedCell(BaseModel):
+    eta_sq:         Optional[float] = None
+    point_biserial: Optional[float] = None
+    rank_biserial:  Optional[float] = None
+    p_value:        Optional[float] = None
+    n_categories:   int = 0
+
+
+class MixedPair(BaseModel):
+    num_col:        str
+    cat_col:        str
+    eta_sq:         Optional[float] = None
+    point_biserial: Optional[float] = None
+    rank_biserial:  Optional[float] = None
+    p_value:        Optional[float] = None
+    n_categories:   int = 0
+
+
 class CorrelationResult(BaseModel):
-    method: str
-    matrix: dict[str, Any]
-    top_pairs: list[dict[str, Any]]
-    vif: Optional[list[dict[str, Any]]] = None
-    cramers_v: Optional[dict[str, Any]] = None
+    method:         str
+    column_profile: Optional[CorrelationColumnProfile] = None
+
+    matrix:    dict[str, Any]            = {}
+    p_values:  dict[str, Any]            = {}
+    top_pairs: list[dict[str, Any]]      = []
+    vif:       Optional[list[dict[str, Any]]] = None
+
+    cramers_v:     Optional[dict[str, Any]] = None
+    theils_u:      Optional[dict[str, Any]] = None
+    cat_p_values:  Optional[dict[str, Any]] = None
+    cat_top_pairs: Optional[list[CatPair]] = None
+
+    mixed:           Optional[dict[str, Any]] = None
+    mixed_top_pairs: Optional[list[MixedPair]] = None
+
+    insights: Optional[list[dict[str, Any]]] = None
 
 
 class OutlierResult(BaseModel):
@@ -91,23 +137,32 @@ class FeatureImportanceResult(BaseModel):
 
 
 class TimeSeriesResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     time_col: str
     value_col: str
     n_points: int
     start_date: str
     end_date: str
+
     has_trend: bool
-    seasonality: Optional[str] = None
-    adf_statistic: Optional[float] = None
-    adf_pvalue: Optional[float] = None
-    is_stationary: Optional[bool] = None
+
+    seasonality: int | None = None
+
+    adf_statistic: float | None = None
+    adf_pvalue: float | None = None
+    is_stationary: bool | None = None
+
     line_data: dict[str, Any]
     rolling: dict[str, Any]
-    decomposition: Optional[dict[str, Any]] = None
-    acf: Optional[dict[str, Any]] = None
-    pacf: Optional[dict[str, Any]] = None
+
+    decomposition: dict[str, Any] | None = None
+    acf: dict[str, Any] | None = None
+    pacf: dict[str, Any] | None = None
+
     anomalies: list[dict[str, Any]] = []
-    error: Optional[str] = None
+
+    error: str | None = None
 
 
 class TextResult(BaseModel):

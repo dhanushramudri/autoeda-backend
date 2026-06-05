@@ -44,6 +44,8 @@ class _InMemoryBus:
             self._subs[channel].remove(q)
         except ValueError:
             pass
+        if not self._subs.get(channel):
+            self._subs.pop(channel, None)
 
     async def publish(self, channel: str, event: dict) -> None:
         # "workspace:*" broadcasts to every workspace channel
@@ -57,9 +59,34 @@ class _InMemoryBus:
                 try:
                     q.put_nowait(event)
                 except asyncio.QueueFull:
+                    logger.warning(
+                        "EventBus: queue full on channel=%s, dropping slow consumer",
+                        target,
+                    )
                     dead.append(q)
             for q in dead:
                 self.unsubscribe(target, q)
+
+    def drain_all(self) -> None:
+        """
+        FIX: push a sentinel into every live queue so all SSE generators wake
+        up and exit immediately during server shutdown, rather than waiting up
+        to KEEPALIVE_TIMEOUT seconds for the next asyncio.wait_for to expire.
+
+        Call this from the ASGI lifespan shutdown hook:
+            @asynccontextmanager
+            async def lifespan(app):
+                yield
+                event_bus.drain_all()   
+        """
+        sentinel = {"_sentinel": True}
+        for channel, queues in list(self._subs.items()):
+            for q in list(queues):
+                try:
+                    q.put_nowait(sentinel)
+                except asyncio.QueueFull:
+                    pass
+        logger.info("EventBus: drained %d channel(s) for shutdown", len(self._subs))
 
 
 # ── Redis backend ─────────────────────────────────────────────────────────────
@@ -83,6 +110,8 @@ class _RedisBus:
             self._subs[channel].remove(q)
         except ValueError:
             pass
+        if not self._subs.get(channel):
+            self._subs.pop(channel, None)
 
     async def _listen(self, channel: str) -> None:
         try:
@@ -97,6 +126,10 @@ class _RedisBus:
                         try:
                             q.put_nowait(event)
                         except asyncio.QueueFull:
+                            logger.warning(
+                                "EventBus(Redis): queue full on channel=%s, dropping slow consumer",
+                                channel,
+                            )
                             dead.append(q)
                     for q in dead:
                         self.unsubscribe(channel, q)
@@ -108,15 +141,21 @@ class _RedisBus:
     async def publish(self, channel: str, event: dict) -> None:
         await self._r.publish(channel, json.dumps(event))
 
+    def drain_all(self) -> None:
+        """No-op for Redis backend — listeners are cancelled by the event loop."""
+        pass
+
 
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 def _build(redis_url: Optional[str]):
-    logger.info("EventBus → in-memory (Redis disabled)")
+    if redis_url:
+        logger.info("EventBus → Redis (%s)", redis_url)
+        return _RedisBus(redis_url)
+    logger.info("EventBus → in-memory")
     return _InMemoryBus()
 
 
-# Lazily initialised on first import of this module after app startup.
 _bus_instance = None
 
 
@@ -138,6 +177,10 @@ class _BusProxy:
 
     async def publish(self, channel: str, event: dict) -> None:
         await _get_bus().publish(channel, event)
+
+    def drain_all(self) -> None:
+        """Wake all live SSE queues with a sentinel so they exit immediately."""
+        _get_bus().drain_all()
 
 
 event_bus = _BusProxy()

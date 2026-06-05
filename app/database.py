@@ -50,6 +50,7 @@ def init_db():
     _migrate_feedback_comment_parent()
     _seed_admin()
     _seed_test_user()
+    _seed_microsoft_emails()
     _promote_jman_admins()
 
 
@@ -102,7 +103,7 @@ def _promote_jman_admins():
     """Ensure specific @jmangroup.com accounts are always admins."""
     from .models.user import User
 
-    ADMIN_EMAILS = {
+    ADMIN_EMAILS = set(settings.ADMIN_EMAILS) if settings.ADMIN_EMAILS else {
         "admin@jmangroup.com",
         "autoeda@jmangroup.com",
         "dhanush.r@jmangroup.com",
@@ -178,23 +179,41 @@ def _seed_test_user():
         if existing:
             return
 
-        test_user = User(
-            email=TEST_EMAIL,
-            full_name="Test User",
-            hashed_password=get_password_hash(TEST_PASSWORD),
-            is_active=True,
-            is_admin=False,
-        )
-        db.add(test_user)
-        db.flush()
+        db.commit()
+    finally:
+        db.close()
 
-        # Add to all existing workspaces
-        for ws in db.query(Workspace).all():
-            already_member = db.query(WorkspaceMember).filter_by(
-                workspace_id=ws.id, user_id=test_user.id
-            ).first()
-            if not already_member:
-                db.add(WorkspaceMember(workspace_id=ws.id, user_id=test_user.id, role="member"))
+
+def _seed_microsoft_emails():
+    """
+    Seed Microsoft-enabled emails from the MICROSOFT_EMAILS env var.
+    These emails can login via the /auth/microsoft-mock endpoint.
+    """
+    from .models.user import User
+    from .auth import get_password_hash
+
+    if not settings.MICROSOFT_EMAILS:
+        return
+
+    db = SessionLocal()
+    try:
+        for email in settings.MICROSOFT_EMAILS:
+            existing = db.query(User).filter(User.email == email).first()
+            if existing:
+                continue
+
+            full_name = email.split("@")[0].replace(".", " ").title()
+
+            # Create user with a dummy password (will use Microsoft auth)
+            user = User(
+                email=email,
+                full_name=full_name,
+                hashed_password=get_password_hash("microsoft_auth_placeholder"),
+                is_active=True,
+                is_admin=False,
+            )
+            db.add(user)
+            db.flush()
 
         db.commit()
     finally:

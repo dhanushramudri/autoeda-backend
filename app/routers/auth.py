@@ -9,7 +9,7 @@ from ..auth import (
 )
 from ..database import get_db
 from ..models.user import User
-from ..schemas.auth import LoginRequest, PasswordChange, ProfileUpdate, TokenResponse, UserCreate, UserResponse
+from ..schemas.auth import LoginRequest, MicrosoftMockLoginRequest, PasswordChange, ProfileUpdate, TokenResponse, UserCreate, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -24,6 +24,63 @@ def login(request: LoginRequest, response: Response, db: Session = Depends(get_d
         )
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account inactive")
+
+    token = create_access_token({"sub": str(user.id)})
+    response.set_cookie(
+        key="access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 8,
+    )
+    return TokenResponse(
+        access_token=token,
+        user={"id": user.id, "email": user.email, "full_name": user.full_name, "is_admin": user.is_admin},
+    )
+
+
+@router.post("/microsoft-mock", response_model=TokenResponse)
+def microsoft_mock_login(
+    request: MicrosoftMockLoginRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """
+    Mock Microsoft authentication endpoint.
+    
+    Accepts: { "email": "user@jmangroup.com", "full_name": "User Name" (optional) }
+    
+    Checks if email exists in database. If not, creates a new user.
+    Only allows emails that have been seeded or explicitly registered.
+    """
+    email = request.email.lower().strip()
+    full_name = (request.full_name or "").strip() or email.split("@")[0]
+
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is required",
+        )
+
+    # Check if email is allowed (must be in database as seeded user or existing account)
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Email {email} is not authorized. Please contact an administrator.",
+        )
+
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account inactive",
+        )
+
+    # Update full_name if provided in request
+    if full_name and full_name != user.full_name:
+        user.full_name = full_name
+        db.commit()
 
     token = create_access_token({"sub": str(user.id)})
     response.set_cookie(

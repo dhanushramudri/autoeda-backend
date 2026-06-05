@@ -7,6 +7,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class MicrosoftMockLoginRequest(BaseModel):
+    """Mock Microsoft authentication request"""
+    email: str
+    full_name: str | None = None
+
+
 class UserInfo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
