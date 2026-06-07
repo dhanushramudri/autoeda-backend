@@ -139,6 +139,10 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     clf = None
     computed = ["metadata"]
     
+    if ("shap" in methods_set or "stability" in methods_set or 
+    "interactions" in methods_set or "permutation" in methods_set):
+        methods_set.add("rf")  
+
     if "rf" in methods_set or "permutation" in methods_set or "shap" in methods_set:
         try:
             clf = (
