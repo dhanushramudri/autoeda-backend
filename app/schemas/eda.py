@@ -124,17 +124,25 @@ class FeatureImportanceResult(BaseModel):
     n_samples: int = 0
     n_features: int = 0
     model_score: Optional[float] = None
+    cv_score_mean: Optional[float] = None        
+    cv_score_std: Optional[float] = None         
     class_distribution: Optional[dict[str, Any]] = None
-    importances: list[dict[str, Any]]
-    mutual_info: list[dict[str, Any]]
-    correlations: list[dict[str, Any]]
+    importances: list[dict[str, Any]] = []
+    permutation_importances: list[dict[str, Any]] = []   
+    mutual_info: list[dict[str, Any]] = []
+    correlations: list[dict[str, Any]] = []
     anova: list[dict[str, Any]] = []
+    shap_values: list[dict[str, Any]] = []      
     feature_meta: list[dict[str, Any]] = []
+    stability: list[dict[str, Any]] = []        
+    interactions: list[dict[str, Any]] = []      
+    redundant_groups: list[dict[str, Any]] = []  
+    leakage_suspects: list[dict[str, Any]] = [] 
     top_features: list[str] = []
     drop_candidates: list[str] = []
     warnings: list[dict[str, Any]] = []
+    computed_methods: list[str] = []             
     error: Optional[str] = None
-
 
 class TimeSeriesResult(BaseModel):
     model_config = ConfigDict(extra="allow")
