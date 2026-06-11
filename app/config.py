@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     SHAREPOINT_SHEET: str = "Sheet1"
     SHAREPOINT_TABLE: str = "FeedbackTable"
 
-    REDIS_URL: str = ""
 
     @property
     def admin_emails_list(self) -> list[str]:

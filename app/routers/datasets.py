@@ -107,16 +107,7 @@ async def create_dataset(
     from ..tasks import run_eda_pipeline
     background_tasks.add_task(run_eda_pipeline, job_id, dataset_id, file_path, config)
 
-    async def _notify():
-        from ..core.event_bus import event_bus
-        await event_bus.publish(f"workspace:{workspace_id}", {
-            "_actor_id": current_user.id,
-            "type": "dataset_created",
-            "dataset_id": str(dataset_id),
-            "name": name,
-            "actor": current_user.full_name or current_user.email,
-        })
-    background_tasks.add_task(_notify)
+
 
     resp = DatasetCreateResponse.model_validate(ds)
     resp.job_id = job_id
@@ -152,15 +143,6 @@ def delete_dataset(
     ds_name = ds.name
     db.delete(ds)
     db.commit()
-
-    from ..core.event_bus import emit_nowait
-    emit_nowait(f"workspace:{workspace_id}", {
-        "_actor_id": current_user.id,
-        "type": "dataset_deleted",
-        "dataset_id": str(dataset_id),
-        "name": ds_name,
-        "actor": current_user.full_name or current_user.email,
-    })
 
 
 @router.post("/workspaces/{workspace_id}/datasets/{dataset_id}/refresh", response_model=DatasetCreateResponse)

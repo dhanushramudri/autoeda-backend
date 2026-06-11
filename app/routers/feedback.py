@@ -203,14 +203,6 @@ async def submit_feedback(
     db.commit()
     db.refresh(row)
 
-    from ..core.event_bus import emit_nowait
-    emit_nowait("workspace:*", {
-        "_actor_id": current_user.id,
-        "type": "feedback_submitted",
-        "feedback_type": feedback_type,
-        "subject": (subject.strip() if subject else None),
-        "actor": current_user.full_name or current_user.email,
-    })
 
     out = FeedbackOut.model_validate(row)
     return out
@@ -359,34 +351,7 @@ def add_comment(
     db.commit()
     db.refresh(comment)
 
-    # ── Mention notifications ─────────────────────────────────────────────────
-    mentioned_names = _extract_mentioned_names(payload.content)
-    if mentioned_names:
-        from ..core.event_bus import emit_nowait
-        from ..models.user import User as _User
-        preview = _strip_html(payload.content)[:120].strip()
-        subject = fb.subject or _strip_html(fb.message)[:60]
 
-        for name in mentioned_names:
-            parts = name.lower().split()
-            mentioned_user = db.query(_User).filter(
-                or_(
-                    func.lower(_User.full_name) == name.lower(),
-                    func.lower(_User.email).like(f"{parts[0]}@%"),
-                )
-            ).first()
-
-            if mentioned_user and mentioned_user.id != current_user.id:
-                emit_nowait("workspace:*", {
-                    "_actor_id": current_user.id,
-                    "_for_user_id": mentioned_user.id,
-                    "type": "comment_mention",
-                    "feedback_id": feedback_id,
-                    "comment_id": comment.id,
-                    "actor": current_user.full_name or current_user.email,
-                    "subject": subject,
-                    "preview": preview,
-                })
 
     return FeedbackCommentOut(
         id=comment.id,

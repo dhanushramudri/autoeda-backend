@@ -13,7 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 Path("uploads").mkdir(exist_ok=True)
 
 from .database import init_db
-from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router, realtime as realtime_router
+from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,9 +24,6 @@ logger = logging.getLogger("autoeda")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import asyncio
-    from .core.event_bus import init as init_event_bus
-    init_event_bus(asyncio.get_running_loop())
     init_db()
     logger.info("AutoEDA backend started — DB initialised")
     yield
@@ -95,7 +92,7 @@ app.include_router(sources.router, prefix="/api/v1")
 app.include_router(warehouse.router, prefix="/api/v1")
 app.include_router(ai_router.router, prefix="/api/v1")
 app.include_router(feedback_router.router, prefix="/api/v1")
-app.include_router(realtime_router.router, prefix="/api/v1")
+# app.include_router(realtime_router.router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")
