@@ -36,6 +36,35 @@ def dataset_visibility_filter(db: Session, workspace_id: int):
     return Dataset.workspace_id == workspace_id
 
 
+def accessible_datasets_query(db: Session, user: User):
+    """All datasets a user can see across every workspace they belong to,
+    plus every globally-shared dataset. Used by the dataset-doc hub's
+    dataset picker, which is cross-workspace by design."""
+    if user.is_admin:
+        return db.query(Dataset)
+    member_ws_ids = [
+        m.workspace_id for m in
+        db.query(WorkspaceMember).filter(WorkspaceMember.user_id == user.id).all()
+    ]
+    gid = global_dataset_user_id(db)
+    conditions = [Dataset.workspace_id.in_(member_ws_ids)] if member_ws_ids else []
+    if gid is not None:
+        conditions.append(Dataset.created_by == gid)
+    if not conditions:
+        return db.query(Dataset).filter(Dataset.id.is_(None))  # no access to anything
+    return db.query(Dataset).filter(or_(*conditions))
+
+
+def has_dataset_access(ds: Dataset, user: User, db: Session) -> bool:
+    """Non-raising version of assert_dataset_access — for filtering a list
+    (e.g. linked datasets on an article) rather than rejecting a whole request."""
+    try:
+        assert_dataset_access(ds, user, db)
+        return True
+    except HTTPException:
+        return False
+
+
 def assert_dataset_access(ds: Dataset, user: User, db: Session, roles: list[str] | None = None) -> None:
     """Authorize user against ds: allowed if they're a member of ds.workspace_id
     (with the given role, if any), if they're a global admin, or if ds was
