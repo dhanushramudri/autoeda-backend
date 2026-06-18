@@ -9,11 +9,23 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_active_user
 from ..models.user import User
+from ..models.workspace import WorkspaceMember
 from ..models.dataset import Dataset
 from ..models.data_source import DataSource
 from ..connectors.registry import get_connector
 
 router = APIRouter(tags=["warehouse"])
+
+
+def _assert_member(workspace_id: int, user: User, db: Session):
+    if user.is_admin:
+        return
+    m = db.query(WorkspaceMember).filter(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.user_id == user.id,
+    ).first()
+    if not m:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
 
 
 # ── Slug helpers ───────────────────────────────────────────────────────────────
@@ -153,6 +165,7 @@ def get_warehouse_catalog(
     - One section for workspace-uploaded datasets
     """
     wid = _normalize_wid(workspace_id)
+    _assert_member(wid, current_user, db)
 
     sections = []
 
@@ -256,6 +269,7 @@ def get_source_table_columns(
     current_user: User = Depends(get_current_active_user),
 ):
     wid = _normalize_wid(workspace_id)
+    _assert_member(wid, current_user, db)
     src = db.query(DataSource).filter(
         DataSource.id == source_id,
         DataSource.workspace_id == wid,
@@ -287,6 +301,7 @@ def execute_warehouse_sql(
     current_user: User = Depends(get_current_active_user),
 ):
     wid = _normalize_wid(workspace_id)
+    _assert_member(wid, current_user, db)
     duckdb = _load_duckdb()
 
     # Step 1: load metadata only (no file_data blob) to compute slugs.
@@ -413,6 +428,7 @@ def explain_warehouse_sql(
     current_user: User = Depends(get_current_active_user),
 ):
     wid = _normalize_wid(workspace_id)
+    _assert_member(wid, current_user, db)
     duckdb = _load_duckdb()
     all_datasets = _get_ready_datasets(wid, db, load_data=False)
     slug_to_id = {_slugify(ds.name): ds.id for ds in all_datasets}

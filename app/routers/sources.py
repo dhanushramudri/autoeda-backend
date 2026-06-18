@@ -14,10 +14,22 @@ import pandas as pd
 from ..database import get_db
 from ..auth import get_current_active_user
 from ..models.user import User
+from ..models.workspace import WorkspaceMember
 from ..models.data_source import DataSource
 from ..connectors.registry import get_connector, SOURCE_CATALOG
 
 router = APIRouter(tags=["sources"])
+
+
+def _assert_member(workspace_id: int, user: User, db: Session):
+    if user.is_admin:
+        return
+    m = db.query(WorkspaceMember).filter(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.user_id == user.id,
+    ).first()
+    if not m:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
 
 # ── JSON serialization helper for NaN values ───────────────────────────────────
 
@@ -123,11 +135,12 @@ class ImportDataRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _source_or_404(source_id: int, workspace_id: str, db: Session) -> DataSource:
+def _source_or_404(source_id: int, workspace_id: str, db: Session, current_user: User) -> DataSource:
     try:
         wid = int(workspace_id)
     except (ValueError, TypeError):
         wid = workspace_id  # type: ignore
+    _assert_member(wid, current_user, db)
     src = db.query(DataSource).filter(
         DataSource.id == source_id,
         DataSource.workspace_id == wid,
@@ -181,6 +194,7 @@ def list_sources(
         wid = int(workspace_id)
     except (ValueError, TypeError):
         wid = workspace_id  # type: ignore
+    _assert_member(wid, current_user, db)
     sources = db.query(DataSource).filter(DataSource.workspace_id == wid).all()
     return {"sources": [_serialize(s) for s in sources]}
 
@@ -196,6 +210,7 @@ def create_source(
         wid = int(workspace_id)
     except (ValueError, TypeError):
         wid = workspace_id  # type: ignore
+    _assert_member(wid, current_user, db)
 
     creds_enc = _encrypt(json.dumps(body.credentials)) if body.credentials else None
     src = DataSource(
@@ -220,7 +235,7 @@ def get_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    return _serialize(_source_or_404(source_id, workspace_id, db))
+    return _serialize(_source_or_404(source_id, workspace_id, db, current_user))
 
 
 @router.patch("/workspaces/{workspace_id}/sources/{source_id}")
@@ -231,7 +246,7 @@ def update_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     if body.name is not None:
         src.name = body.name
     if body.description is not None:
@@ -255,7 +270,7 @@ def delete_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     db.delete(src)
     db.commit()
 
@@ -269,7 +284,7 @@ def test_existing_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     try:
         connector = get_connector(src.source_type)
         cfg = _build_connector_config(src)
@@ -308,7 +323,7 @@ def get_source_schema(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     try:
         connector = get_connector(src.source_type)
         cfg = _build_connector_config(src)
@@ -333,7 +348,7 @@ def get_table_columns(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     try:
         connector = get_connector(src.source_type)
         cfg = {**_build_connector_config(src), "table": table_name, "query": None}
@@ -355,7 +370,7 @@ def preview_source(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     try:
         connector = get_connector(src.source_type)
         cfg = _build_connector_config(src)
@@ -393,7 +408,7 @@ def import_as_dataset(
     import pandas as pd
     import hashlib
 
-    src = _source_or_404(source_id, workspace_id, db)
+    src = _source_or_404(source_id, workspace_id, db, current_user)
     try:
         connector = get_connector(src.source_type)
         cfg = _build_connector_config(src)

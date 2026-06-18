@@ -9,10 +9,22 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models.dataset import Dataset
 from ..models.job import BackgroundJob
+from ..models.workspace import WorkspaceMember
 from ..auth import get_current_active_user
 from ..models.user import User
 
 router = APIRouter(tags=["join_builder"])
+
+
+def _assert_member(workspace_id: int, user: User, db: Session):
+    if user.is_admin:
+        return
+    m = db.query(WorkspaceMember).filter(
+        WorkspaceMember.workspace_id == workspace_id,
+        WorkspaceMember.user_id == user.id,
+    ).first()
+    if not m:
+        raise HTTPException(status_code=403, detail="Not a workspace member")
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -94,15 +106,20 @@ def _load_duckdb():
         raise HTTPException(status_code=503, detail="DuckDB not installed")
 
 
-def _load_dataset_df(dataset_id: Union[str, int], db: Session):
-    """Load a dataset as a pandas DataFrame — handles both disk and DB-stored files."""
+def _load_dataset_df(dataset_id: Union[str, int], db: Session, workspace_id: int):
+    """Load a dataset as a pandas DataFrame — handles both disk and DB-stored files.
+
+    Always scoped to workspace_id so a node referencing a dataset from a
+    different workspace can't be used to pull or join in data the caller
+    isn't a member of.
+    """
     import os
     try:
         did = int(dataset_id)
     except (ValueError, TypeError):
         did = dataset_id  # type: ignore[assignment]
 
-    ds = db.query(Dataset).filter(Dataset.id == did).first()
+    ds = db.query(Dataset).filter(Dataset.id == did, Dataset.workspace_id == workspace_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 
@@ -168,7 +185,7 @@ def _build_sql(nodes: list[JoinNode], edges: list[JoinEdge]) -> tuple[str, dict]
     return sql, alias_map
 
 
-def _execute_sql(nodes: list[JoinNode], edges: list[JoinEdge], db: Session, limit: int = 0):
+def _execute_sql(nodes: list[JoinNode], edges: list[JoinEdge], db: Session, workspace_id: int, limit: int = 0):
     """Load DataFrames, register with DuckDB, execute SQL. Returns (df_result, sql, columns, rows)."""
     duckdb = _load_duckdb()
     sql, alias_map = _build_sql(nodes, edges)
@@ -177,7 +194,7 @@ def _execute_sql(nodes: list[JoinNode], edges: list[JoinEdge], db: Session, limi
     try:
         for node in nodes:
             alias = alias_map[node.id]
-            df = _load_dataset_df(node.id, db)
+            df = _load_dataset_df(node.id, db, workspace_id)
             con.register(f"df_{alias}", df)
 
         query = f"SELECT * FROM ({sql}) __q" + (f" LIMIT {limit}" if limit > 0 else "")
@@ -198,6 +215,7 @@ def generate_join_sql(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    _assert_member(int(workspace_id), current_user, db)
     try:
         sql, _ = _build_sql(body.nodes, body.edges)
         return {"sql": sql}
@@ -214,8 +232,10 @@ def execute_join(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    wid = int(workspace_id)
+    _assert_member(wid, current_user, db)
     try:
-        rows, columns, sql = _execute_sql(body.nodes, body.edges, db, limit=body.limit)
+        rows, columns, sql = _execute_sql(body.nodes, body.edges, db, wid, limit=body.limit)
         return {
             "sql": sql,
             "columns": columns,
@@ -242,8 +262,10 @@ def save_join_as_dataset(
     import json
     import pandas as pd
 
+    wid = int(workspace_id)
+    _assert_member(wid, current_user, db)
     try:
-        rows, columns, sql = _execute_sql(body.nodes, body.edges, db, limit=0)
+        rows, columns, sql = _execute_sql(body.nodes, body.edges, db, wid, limit=0)
     except HTTPException:
         raise
     except Exception as exc:
@@ -259,7 +281,7 @@ def save_join_as_dataset(
 
     # Create dataset record
     ds = Dataset(
-        workspace_id=int(workspace_id),
+        workspace_id=wid,
         name=body.name,
         description=f"Joined dataset — {len(body.nodes)} tables, {len(body.edges)} join(s)",
         source_type="file",
