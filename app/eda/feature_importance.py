@@ -415,6 +415,15 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         except Exception:
             pass
 
+
+    perm_map = {item["feature"]: item["importance"] for item in perm_importances}
+    shap_map = {item["feature"]: item["mean_abs_shap"] for item in shap_values_list}
+    stability_map = {item["feature"]: item["cv"] for item in stability_list}
+    for fm in feature_meta:
+        fm["permutation_importance"] = perm_map.get(fm["feature"])
+        fm["shap_value"] = shap_map.get(fm["feature"])
+        fm["stability_score"] = stability_map.get(fm["feature"])
+
     return {
         "target": target,
         "problem_type": problem_type,
