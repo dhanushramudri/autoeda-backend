@@ -34,6 +34,15 @@ warnings.filterwarnings("ignore")
 # ---------------------------------------------------------------------------
 
 MAX_POINTS = 2_000  # max points sent to frontend for rendering
+QUADRATIC_TEST_CAP = 5_000  # zivot-andrews / mann-kendall are O(n^2) — subsample above this
+
+
+def _subsample_series(series: pd.Series, n: int = QUADRATIC_TEST_CAP) -> pd.Series:
+    """Evenly-spaced subsample to bound O(n^2) statistical tests on huge series."""
+    if len(series) <= n:
+        return series
+    idx = np.round(np.linspace(0, len(series) - 1, n)).astype(int)
+    return series.iloc[idx].reset_index(drop=True)
 
 
 def _safe(val) -> float | None:
@@ -229,7 +238,7 @@ def _stationarity_tests(series: pd.Series) -> dict:
     try:
         from statsmodels.tsa.stattools import zivot_andrews
 
-        za = zivot_andrews(s)
+        za = zivot_andrews(_subsample_series(s))
         result["zivot_andrews"] = {
             "statistic": _safe(float(za[0])),
             "pvalue": _safe(float(za[1])),
@@ -602,7 +611,7 @@ def _trend_tests(series: pd.Series) -> dict:
     try:
         import pymannkendall as mk
 
-        res = mk.original_test(s)
+        res = mk.original_test(_subsample_series(s))
         result["mann_kendall"] = {
             "trend": res.trend,
             "p_value": _safe(res.p),

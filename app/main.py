@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 Path("uploads").mkdir(exist_ok=True)
 
 from .database import init_db
+from .process_pool import shutdown_pool
 from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router
 
 logging.basicConfig(
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("AutoEDA backend started — DB initialised")
     yield
+    shutdown_pool()
 
 
 app = FastAPI(

@@ -10,6 +10,7 @@ from ..database import get_db
 from ..models.dataset import Dataset
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
+from ..process_pool import AnalysisCrashed, AnalysisTimeout, run_isolated
 from ..schemas.eda import (
     CorrelationResult,
     DistributionResult,
@@ -24,6 +25,21 @@ from ..schemas.eda import (
 )
 
 router = APIRouter(prefix="/datasets", tags=["eda"])
+
+
+def _run_isolated(fn, *args, **kwargs):
+    """Run a heavy EDA computation in the shared process pool.
+
+    Keeps CPU/memory-heavy work out of the request thread so it can't starve
+    other users' requests, and so a crash/OOM in one analysis only fails this
+    one request instead of taking down the whole API process.
+    """
+    try:
+        return run_isolated(fn, *args, **kwargs)
+    except AnalysisTimeout as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except AnalysisCrashed as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) -> Dataset:
@@ -91,7 +107,7 @@ def get_profile(
     try:
         df = _load_df(ds)
         from ..eda.profiler import run_profile
-        result = run_profile(df)
+        result = _run_isolated(run_profile, df)
         if ds.file_path:
             import os
             result["file_size_bytes"] = os.path.getsize(ds.file_path)
@@ -118,7 +134,7 @@ def get_missing(
     try:
         df = _load_df(ds)
         from ..eda.missing import run_missing_analysis
-        result = run_missing_analysis(df)
+        result = _run_isolated(run_missing_analysis, df)
         store_result(db, dataset_id, "missing", cache_key, result, ds.content_hash or "")
         return MissingResult(**result)
     except Exception as e:
@@ -141,7 +157,7 @@ def get_distributions(
     try:
         df = _load_df(ds)
         from ..eda.distributions import run_distribution
-        result = run_distribution(df, column)
+        result = _run_isolated(run_distribution, df, column)
         store_result(db, dataset_id, "distributions", cache_key, result, ds.content_hash or "")
         return DistributionResult(**result)
     except Exception as e:
@@ -164,7 +180,7 @@ def get_correlations(
     try:
         df = _load_df(ds)
         from ..eda.correlations import run_correlations
-        result = run_correlations(df, method)
+        result = _run_isolated(run_correlations, df, method)
         store_result(db, dataset_id, "correlations", cache_key, result, ds.content_hash or "")
         return CorrelationResult.model_validate(result)
     except Exception as e:
@@ -188,7 +204,7 @@ def get_outliers(
     try:
         df = _load_df(ds)
         from ..eda.outliers import run_outlier_detection
-        result = run_outlier_detection(df, method, column)
+        result = _run_isolated(run_outlier_detection, df, method, column)
         store_result(db, dataset_id, "outliers", cache_key, result, ds.content_hash or "")
         return OutlierResult(**result)
     except Exception as e:
@@ -239,8 +255,8 @@ def get_feature_importance(
     try:
         df = _load_df(ds)
         from ..eda.feature_importance import run_feature_importance
-        
-        result = run_feature_importance(df, target, methods=methods_list)
+
+        result = _run_isolated(run_feature_importance, df, target, methods=methods_list, timeout=240)
         
         store_result(
             db, dataset_id, "feature_importance",
@@ -340,7 +356,7 @@ def get_timeseries(
     try:
         df = _load_df(ds)
         from ..eda.timeseries import run_timeseries
-        result = run_timeseries(df, time_col, value_col)
+        result = _run_isolated(run_timeseries, df, time_col, value_col)
         store_result(db, dataset_id, "timeseries", cache_key, result, ds.content_hash or "")
         return TimeSeriesResult(**result)
     except Exception as e:
@@ -363,7 +379,7 @@ def get_text_analysis(
     try:
         df = _load_df(ds)
         from ..eda.text_analysis import run_text_analysis
-        result = run_text_analysis(df, column)
+        result = _run_isolated(run_text_analysis, df, column)
         store_result(db, dataset_id, "text", cache_key, result, ds.content_hash or "")
         return TextResult(**result)
     except Exception as e:
@@ -385,7 +401,7 @@ def get_quality_score(
     try:
         df = _load_df(ds)
         from ..eda.quality_score import run_quality_score
-        result = run_quality_score(df)
+        result = _run_isolated(run_quality_score, df)
         store_result(db, dataset_id, "quality_score", cache_key, result, ds.content_hash or "")
         return QualityScore(**result)
     except Exception as e:
@@ -406,9 +422,9 @@ def get_insights(
         from ..eda.correlations import run_correlations
         from ..insights import InsightEngine
 
-        profile = run_profile(df)
-        quality = run_quality_score(df)
-        correlations = run_correlations(df)
+        profile = _run_isolated(run_profile, df)
+        quality = _run_isolated(run_quality_score, df)
+        correlations = _run_isolated(run_correlations, df)
 
         engine = InsightEngine()
         insights = (
@@ -453,7 +469,7 @@ def get_analysis(
     try:
         df = _load_df(ds)
         from ..eda.analysis import run_full_analysis
-        result = run_full_analysis(df)
+        result = _run_isolated(run_full_analysis, df, timeout=240)
         store_result(db, dataset_id, "analysis", cache_key, result, ds.content_hash or "")
         return result
     except Exception as e:
@@ -538,11 +554,11 @@ def get_bivariate(
             compute_bivariate_num_num, compute_bivariate_cat_cat, compute_bivariate_num_cat
         )
         if btype == "num_num":
-            result = compute_bivariate_num_num(df, col1, col2)
+            result = _run_isolated(compute_bivariate_num_num, df, col1, col2)
         elif btype == "cat_cat":
-            result = compute_bivariate_cat_cat(df, col1, col2)
+            result = _run_isolated(compute_bivariate_cat_cat, df, col1, col2)
         else:
-            result = compute_bivariate_num_cat(df, col1, col2)
+            result = _run_isolated(compute_bivariate_num_cat, df, col1, col2)
         store_result(db, dataset_id, "bivariate", cache_key, result, ds.content_hash or "")
         return result
     except Exception as e:
@@ -567,7 +583,7 @@ def get_pca(
         from ..eda.analysis import compute_pca
         from ..eda.profiler import classify_column
         num_cols = [c for c in df.columns if classify_column(df[c]) == "numeric"]
-        result = compute_pca(df, num_cols, n_components)
+        result = _run_isolated(compute_pca, df, num_cols, n_components)
         store_result(db, dataset_id, "pca", cache_key, result, ds.content_hash or "")
         return result
     except Exception as e:
@@ -592,7 +608,7 @@ def get_scatter3d(
     try:
         df = _load_df(ds)
         from ..eda.analysis import compute_scatter3d
-        result = compute_scatter3d(df, x, y, z)
+        result = _run_isolated(compute_scatter3d, df, x, y, z)
         store_result(db, dataset_id, "scatter3d", cache_key, result, ds.content_hash or "")
         return result
     except Exception as e:
