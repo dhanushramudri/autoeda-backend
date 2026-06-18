@@ -198,13 +198,16 @@ def _normality_tests(series: pd.Series) -> dict:
 
 def _stationarity_tests(series: pd.Series) -> dict:
     s = series.dropna().astype(float)
+    # adfuller's autolag search scales with n (maxlag grows ~n^0.25, each lag is
+    # a fresh OLS fit) — benchmarked at 75s for n=145k vs 0.27s subsampled to 5k.
+    s_test = _subsample_series(s)
     result: dict[str, Any] = {"adf": None, "kpss": None, "zivot_andrews": None, "verdict": "unknown"}
 
     # ADF
     try:
         from statsmodels.tsa.stattools import adfuller
 
-        adf = adfuller(s, autolag="AIC")
+        adf = adfuller(s_test, autolag="AIC")
         adf_stat, adf_p = float(adf[0]), float(adf[1])
         result["adf"] = {
             "statistic": _safe(adf_stat),
@@ -222,7 +225,7 @@ def _stationarity_tests(series: pd.Series) -> dict:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            kpss_res = kpss(s, regression="c", nlags="auto")
+            kpss_res = kpss(s_test, regression="c", nlags="auto")
         kpss_stat, kpss_p = float(kpss_res[0]), float(kpss_res[1])
         result["kpss"] = {
             "statistic": _safe(kpss_stat),
@@ -238,7 +241,7 @@ def _stationarity_tests(series: pd.Series) -> dict:
     try:
         from statsmodels.tsa.stattools import zivot_andrews
 
-        za = zivot_andrews(_subsample_series(s))
+        za = zivot_andrews(s_test)
         result["zivot_andrews"] = {
             "statistic": _safe(float(za[0])),
             "pvalue": _safe(float(za[1])),
@@ -307,9 +310,11 @@ def _decomposition(series: pd.Series, dates: list[str], detected_period: int | N
         # Ensure period doesn't exceed series length
         period = min(period, len(series) // 2)
         
-        # Prefer STL (robust)
+        # Prefer STL (robust). robust=True adds ~15 extra re-weighting passes —
+        # affordable on small series but a real cost driver at huge n, so drop
+        # it above QUADRATIC_TEST_CAP rows (same data/period, just fewer passes).
         try:
-            stl = STL(series, period=period, robust=True)
+            stl = STL(series, period=period, robust=len(series) <= QUADRATIC_TEST_CAP)
             res = stl.fit()
             trend = res.trend
             seasonal = res.seasonal
