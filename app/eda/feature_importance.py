@@ -344,7 +344,11 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
             explainer = shap.TreeExplainer(clf)
             shap_vals = explainer.shap_values(X)
             if isinstance(shap_vals, list):
+                # Older shap: list of (n_samples, n_features) arrays, one per class
                 shap_arr = np.mean([np.abs(s) for s in shap_vals], axis=0)
+            elif isinstance(shap_vals, np.ndarray) and shap_vals.ndim == 3:
+                # Newer shap: single (n_samples, n_features, n_classes) array
+                shap_arr = np.abs(shap_vals).mean(axis=2)
             else:
                 shap_arr = np.abs(shap_vals)
             mean_shap = shap_arr.mean(axis=0)

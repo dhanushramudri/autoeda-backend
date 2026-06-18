@@ -175,15 +175,36 @@ class TimeSeriesResult(BaseModel):
 
 class TextResult(BaseModel):
     column: str
+    total_rows: int
     total_texts: int
+    missing_count: int
+    missing_pct: float
+    empty_count: int
+    empty_pct: float
+    duplicate_count: int
+    duplicate_pct: float
+    top_duplicates: list[dict[str, Any]]
     avg_length: float
     median_length: float
+    avg_char_length: float
+    median_char_length: float
+    min_char_length: int
+    max_char_length: int
+    vocabulary_size: int
+    type_token_ratio: float
     word_freq: list[dict[str, Any]]
+    tfidf_keywords: list[dict[str, Any]]
     bigrams: list[dict[str, Any]]
     trigrams: list[dict[str, Any]]
     sentiment_dist: dict[str, int]
     language: str
     length_distribution: dict[str, Any]
+    char_length_distribution: dict[str, Any]
+    quality_flags: dict[str, Any]
+    pii: dict[str, Any]
+    insights: list[dict[str, Any]]
+    sampled: bool
+    sample_size: Optional[int] = None
     error: Optional[str] = None
 
 
