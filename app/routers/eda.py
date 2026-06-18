@@ -106,6 +106,8 @@ def get_profile(
             result["file_size_bytes"] = os.path.getsize(ds.file_path)
         store_result(db, dataset_id, "profile", cache_key, result, ds.content_hash or "")
         return ProfileResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -130,6 +132,8 @@ def get_missing(
         result = _run_isolated(run_missing_analysis, df)
         store_result(db, dataset_id, "missing", cache_key, result, ds.content_hash or "")
         return MissingResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -153,6 +157,8 @@ def get_distributions(
         result = _run_isolated(run_distribution, df, column)
         store_result(db, dataset_id, "distributions", cache_key, result, ds.content_hash or "")
         return DistributionResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -176,6 +182,8 @@ def get_correlations(
         result = _run_isolated(run_correlations, df, method)
         store_result(db, dataset_id, "correlations", cache_key, result, ds.content_hash or "")
         return CorrelationResult.model_validate(result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -200,6 +208,8 @@ def get_outliers(
         result = _run_isolated(run_outlier_detection, df, method, column)
         store_result(db, dataset_id, "outliers", cache_key, result, ds.content_hash or "")
         return OutlierResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -256,6 +266,8 @@ def get_feature_importance(
             cache_key, result, ds.content_hash or ""
         )
         return FeatureImportanceResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -352,6 +364,8 @@ def get_timeseries(
         result = _run_isolated(run_timeseries, df, time_col, value_col)
         store_result(db, dataset_id, "timeseries", cache_key, result, ds.content_hash or "")
         return TimeSeriesResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -375,6 +389,8 @@ def get_text_analysis(
         result = _run_isolated(run_text_analysis, df, column)
         store_result(db, dataset_id, "text", cache_key, result, ds.content_hash or "")
         return TextResult(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -397,6 +413,8 @@ def get_quality_score(
         result = _run_isolated(run_quality_score, df)
         store_result(db, dataset_id, "quality_score", cache_key, result, ds.content_hash or "")
         return QualityScore(**result)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -426,6 +444,8 @@ def get_insights(
             + engine.from_quality_score(quality)
         )
         return [InsightCard(**i) for i in insights[:20]]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -465,6 +485,8 @@ def get_analysis(
         result = _run_isolated(run_full_analysis, df, timeout=240)
         store_result(db, dataset_id, "analysis", cache_key, result, ds.content_hash or "")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -554,6 +576,8 @@ def get_bivariate(
             result = _run_isolated(compute_bivariate_num_cat, df, col1, col2)
         store_result(db, dataset_id, "bivariate", cache_key, result, ds.content_hash or "")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -579,6 +603,8 @@ def get_pca(
         result = _run_isolated(compute_pca, df, num_cols, n_components)
         store_result(db, dataset_id, "pca", cache_key, result, ds.content_hash or "")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -604,6 +630,8 @@ def get_scatter3d(
         result = _run_isolated(compute_scatter3d, df, x, y, z)
         store_result(db, dataset_id, "scatter3d", cache_key, result, ds.content_hash or "")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -656,6 +684,8 @@ def transform_preview(
         # Return first 50 rows
         preview_data = df.head(50).to_dict(orient="records")
         return {"success": True, "rows": preview_data, "row_count": len(df)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -736,5 +766,7 @@ def transform_apply(
         db.refresh(new_dataset)
         
         return new_dataset
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

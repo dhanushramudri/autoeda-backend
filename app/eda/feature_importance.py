@@ -14,6 +14,16 @@ def _uniform_threshold(n_features: int) -> float:
     return 1.0 / max(n_features, 1)
 
 
+EXPENSIVE_METHOD_SAMPLE_CAP = 3000
+
+
+def _sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int = EXPENSIVE_METHOD_SAMPLE_CAP, seed: int = 42):
+    if len(X) <= cap:
+        return X, y
+    idx = np.random.RandomState(seed).choice(len(X), size=cap, replace=False)
+    return X.iloc[idx], y[idx]
+
+
 def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | None = None) -> dict:
     """
     Run feature importance analysis with lazy loading support.
@@ -148,7 +158,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
             clf = (
                 RandomForestClassifier(n_estimators=25, max_depth=10, random_state=42, n_jobs=-1, oob_score=True)
                 if problem_type == "classification"
-                else RandomForestRegressor(n_estimators=25, random_state=42, n_jobs=-1, oob_score=True)
+                else RandomForestRegressor(n_estimators=25, max_depth=10, random_state=42, n_jobs=-1, oob_score=True)
             )
             clf.fit(X, y_aligned)
             model_score = round(float(clf.oob_score_), 4)
@@ -323,8 +333,9 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     perm_importances: list[dict] = []
     if "permutation" in methods_set and clf is not None:
         try:
+            X_perm, y_perm = _sample_rows(X, y_aligned)
             perm_result = permutation_importance(
-                clf, X, y_aligned, n_repeats=5, random_state=42, n_jobs=-1
+                clf, X_perm, y_perm, n_repeats=5, random_state=42, n_jobs=-1
             )
             for feat, imp, std in zip(X.columns, perm_result.importances_mean, perm_result.importances_std):
                 perm_importances.append({
@@ -341,8 +352,9 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     if "shap" in methods_set and clf is not None:
         try:
             import shap
+            X_shap, _ = _sample_rows(X, y_aligned)
             explainer = shap.TreeExplainer(clf)
-            shap_vals = explainer.shap_values(X)
+            shap_vals = explainer.shap_values(X_shap)
             if isinstance(shap_vals, list):
                 # Older shap: list of (n_samples, n_features) arrays, one per class
                 shap_arr = np.mean([np.abs(s) for s in shap_vals], axis=0)
@@ -366,9 +378,10 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     if "stability" in methods_set and n_samples >= 50 and clf is not None:
         try:
             from sklearn.utils import resample
+            X_stab, y_stab = _sample_rows(X, y_aligned)
             bootstrap_importances = {col: [] for col in X.columns}
             for _ in range(10):
-                X_boot, y_boot = resample(X, y_aligned, random_state=None)
+                X_boot, y_boot = resample(X_stab, y_stab, random_state=None)
                 clf_boot = clf.__class__(**{k: v for k, v in clf.get_params().items() if k != 'n_jobs'})
                 clf_boot.fit(X_boot, y_boot)
                 for feat, imp in zip(X.columns, clf_boot.feature_importances_):
