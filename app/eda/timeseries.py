@@ -448,24 +448,78 @@ def _spectral_analysis(series: pd.Series, freq_seconds: float | None) -> dict:
         return {}
 
 
+def _subsample_with_index(arr: np.ndarray, n: int = QUADRATIC_TEST_CAP):
+    """Evenly-spaced subsample that also returns the original positions, so a
+    breakpoint found in the subsample can be mapped back to a real date."""
+    if len(arr) <= n:
+        return arr, np.arange(len(arr))
+    idx = np.round(np.linspace(0, len(arr) - 1, n)).astype(int)
+    return arr[idx], idx
+
+
+def _robust_noise_scale(x: np.ndarray) -> float:
+    """Noise-floor estimate from consecutive differences (MAD-based) — robust
+    to being inflated by the very shifts we're trying to detect, unlike a
+    plain std() computed over the whole series."""
+    diffs = np.diff(x)
+    if len(diffs) == 0:
+        return float(np.std(x))
+    mad = np.median(np.abs(diffs - np.median(diffs)))
+    sigma = mad * 1.4826 / np.sqrt(2)  
+    return float(sigma) if sigma > 0 else float(np.std(x))
+
+
+def _cusum_bootstrap_threshold(x: np.ndarray, k: float, n_bootstrap: int = 100, alpha: float = 0.05, seed: int = 42) -> float:
+    """Calibrate the CUSUM alarm threshold from the data itself: shuffle x many
+    times (destroys any real change-point structure while preserving its own
+    noise/distribution), track the max CUSUM statistic each time under that
+    null, and take the (1-alpha) quantile — the threshold a real shift in
+    *this* series needs to clear to not be explained by chance alone.
+    Vectorized across replicates so the only Python-level loop is over time."""
+    n = len(x)
+    if n < 2:
+        return float("inf")
+    rng = np.random.default_rng(seed)
+    centered = x - x.mean()
+    shuffled = np.tile(centered, (n_bootstrap, 1))
+    rng.permuted(shuffled, axis=1, out=shuffled)
+
+    pos = np.zeros(n_bootstrap)
+    neg = np.zeros(n_bootstrap)
+    max_stat = np.zeros(n_bootstrap)
+    for i in range(n):
+        pos = np.maximum(0.0, pos + shuffled[:, i] - k)
+        neg = np.maximum(0.0, neg - shuffled[:, i] - k)
+        np.maximum(max_stat, pos, out=max_stat)
+        np.maximum(max_stat, neg, out=max_stat)
+    return float(np.quantile(max_stat, 1 - alpha))
+
+
 def _change_point_detection(series: pd.Series, dates: list[str]) -> dict:
-    """PELT change point detection via ruptures (optional dep) or CUSUM fallback."""
+    """PELT change point detection via ruptures (optional dep) or CUSUM fallback.
+
+    No hardcoded penalty/threshold multipliers — both methods derive their
+    sensitivity from the series' own variance/noise/length.
+    """
     s = series.dropna().astype(float).values
     result: dict[str, Any] = {"method": None, "change_points": []}
     if len(s) < 30 or len(dates) != len(series.dropna()):
         return result
 
+    s_sub, idx_map = _subsample_with_index(s)
+
     # Try ruptures (fast C backend)
     try:
         import ruptures as rpt
 
-        model = rpt.Pelt(model="rbf", min_size=max(2, len(s) // 20)).fit(s)
-        pen = 3 * np.std(s)
+        model = rpt.Pelt(model="rbf", min_size=max(2, len(s_sub) // 20)).fit(s_sub)
+
+        pen = np.var(s_sub) * np.log(len(s_sub))
         bkps = model.predict(pen=pen)
-        cps = [int(b - 1) for b in bkps[:-1] if 0 <= b - 1 < len(dates)]
+        cps = [int(idx_map[b - 1]) for b in bkps[:-1] if 0 <= b - 1 < len(idx_map)]
         result["method"] = "PELT (rbf)"
         result["change_points"] = [
-            {"index": i, "date": dates[i], "value": _safe(float(s[i]))} for i in cps[:20]
+            {"index": i, "date": dates[i], "value": _safe(float(s[i]))} for i in cps[:20] if i < len(dates)
         ]
         return result
     except ImportError:
@@ -474,16 +528,16 @@ def _change_point_detection(series: pd.Series, dates: list[str]) -> dict:
     # CUSUM fallback
     try:
         mean = s.mean()
-        std_s = np.std(s)
-        if std_s == 0:
+        k = _robust_noise_scale(s_sub) / 2  # standard SPC convention: allowance = half the noise scale
+        if k == 0:
             return result
+        threshold = _cusum_bootstrap_threshold(s_sub, k)
+
         cusum_pos = np.zeros(len(s))
         cusum_neg = np.zeros(len(s))
-        k = 0.5 * std_s
         for i in range(1, len(s)):
             cusum_pos[i] = max(0, cusum_pos[i - 1] + (s[i] - mean) - k)
             cusum_neg[i] = max(0, cusum_neg[i - 1] - (s[i] - mean) - k)
-        threshold = 5 * std_s
         cp_mask = (cusum_pos > threshold) | (cusum_neg > threshold)
         # Find first crossing per run
         change_pts = []

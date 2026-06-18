@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
+from ..dataset_access import assert_dataset_access, dataset_visibility_filter
 from ..database import get_db
 from ..models.dataset import Dataset
 from ..models.job import BackgroundJob
@@ -38,7 +39,12 @@ def list_datasets(
     current_user: User = Depends(get_current_active_user),
 ):
     _assert_member(workspace_id, current_user, db)
-    return db.query(Dataset).filter(Dataset.workspace_id == workspace_id).order_by(Dataset.created_at.desc()).all()
+    return (
+        db.query(Dataset)
+        .filter(dataset_visibility_filter(db, workspace_id))
+        .order_by(Dataset.created_at.desc())
+        .all()
+    )
 
 
 @router.post(
@@ -121,10 +127,10 @@ def get_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    _assert_member(workspace_id, current_user, db)
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.workspace_id == workspace_id).first()
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db)
     return ds
 
 
@@ -135,10 +141,10 @@ def delete_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    _assert_member(workspace_id, current_user, db, ["admin", "analyst"])
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.workspace_id == workspace_id).first()
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
 
     ds_name = ds.name
     db.delete(ds)
@@ -153,10 +159,10 @@ def refresh_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    _assert_member(workspace_id, current_user, db, ["admin", "analyst"])
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.workspace_id == workspace_id).first()
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
 
     ds.status = "processing"
     db.commit()
@@ -185,10 +191,10 @@ def preview_dataset(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    _assert_member(workspace_id, current_user, db)
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id, Dataset.workspace_id == workspace_id).first()
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db)
 
     try:
         df = _load_dataset_df(ds, limit=100)
@@ -212,7 +218,7 @@ def get_dataset_by_id(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    _assert_member(ds.workspace_id, current_user, db)
+    assert_dataset_access(ds, current_user, db)
     return ds
 
 
@@ -226,7 +232,7 @@ def preview_dataset_shorthand(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    _assert_member(ds.workspace_id, current_user, db)
+    assert_dataset_access(ds, current_user, db)
 
     try:
         df = _load_dataset_df(ds, limit=100)
@@ -253,7 +259,7 @@ def transform_dataset(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    _assert_member(ds.workspace_id, current_user, db, ["admin", "analyst"])
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
 
     df = _load_dataset_df(ds)
     operations = payload.get("operations", [])
@@ -511,7 +517,7 @@ def export_dataset(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    _assert_member(ds.workspace_id, current_user, db)
+    assert_dataset_access(ds, current_user, db)
 
     # Serve DB bytes directly if available (covers file datasets in all environments)
     if ds.file_data:
@@ -601,7 +607,7 @@ def validate_assumption(
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    _assert_member(ds.workspace_id, current_user, db)
+    assert_dataset_access(ds, current_user, db)
 
     if ds.status != "ready":
         raise HTTPException(status_code=400, detail="Dataset is not ready yet.")

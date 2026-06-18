@@ -6,10 +6,10 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
 from ..cache import get_cached_result, store_result
+from ..dataset_access import assert_dataset_access
 from ..database import get_db
 from ..models.dataset import Dataset
 from ..models.user import User
-from ..models.workspace import WorkspaceMember
 from ..process_pool import AnalysisCrashed, AnalysisTimeout, run_isolated
 from ..schemas.eda import (
     CorrelationResult,
@@ -46,14 +46,7 @@ def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) ->
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    if not current_user.is_admin:
-        member = db.query(WorkspaceMember).filter(
-            WorkspaceMember.workspace_id == ds.workspace_id,
-            WorkspaceMember.user_id == current_user.id,
-        ).first()
-        if not member:
-            raise HTTPException(status_code=403, detail="Access denied")
+    assert_dataset_access(ds, current_user, db)
     return ds
 
 

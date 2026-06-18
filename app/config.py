@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     ADMIN_EMAILS: str = ""
     MICROSOFT_EMAILS: str = ""
 
+    # Datasets uploaded by this account are visible & fully editable in every
+    # workspace, regardless of membership — a shared template/sample library.
+    GLOBAL_DATASET_EMAIL: str = "autoeda@jmangroup.com"
+
     GEMINI_API_KEY: str = ""
 
     AZURE_TENANT_ID: str = ""

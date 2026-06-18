@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
 from ..cache import get_cached_result
+from ..dataset_access import assert_dataset_access
 from ..database import get_db
 from ..models.dataset import Dataset
 from ..models.user import User
@@ -19,16 +20,10 @@ router = APIRouter(tags=["ai"])
 
 
 def _get_ds(dataset_id: int, user: User, db: Session) -> Dataset:
-    from ..models.workspace import WorkspaceMember
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(404, "Dataset not found")
-    member = db.query(WorkspaceMember).filter(
-        WorkspaceMember.workspace_id == ds.workspace_id,
-        WorkspaceMember.user_id == user.id,
-    ).first()
-    if not member:
-        raise HTTPException(403, "Not a workspace member")
+    assert_dataset_access(ds, user, db)
     return ds
 
 

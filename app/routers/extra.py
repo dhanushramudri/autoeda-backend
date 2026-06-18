@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
+from ..dataset_access import assert_dataset_access, dataset_visibility_filter
 from ..database import get_db
 from ..models.column_metadata import ColumnMetadata
 from ..models.data_quality_rule import DataQualityRule
@@ -35,13 +36,7 @@ def _get_ds(dataset_id: int, user: User, db: Session) -> Dataset:
     ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(404, "Dataset not found")
-    if not user.is_admin:
-        m = db.query(WorkspaceMember).filter(
-            WorkspaceMember.workspace_id == ds.workspace_id,
-            WorkspaceMember.user_id == user.id,
-        ).first()
-        if not m:
-            raise HTTPException(403, "Access denied")
+    assert_dataset_access(ds, user, db)
     return ds
 
 
@@ -860,7 +855,7 @@ def workspace_analytics(
     _assert_ws_member(workspace_id, current_user, db)
     datasets = (
         db.query(Dataset)
-        .filter(Dataset.workspace_id == workspace_id, Dataset.status == "ready")
+        .filter(dataset_visibility_filter(db, workspace_id), Dataset.status == "ready")
         .order_by(Dataset.created_at.desc())
         .all()
     )

@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..dataset_access import dataset_visibility_filter
 from ..models.dataset import Dataset
 from ..models.job import BackgroundJob
 from ..models.workspace import WorkspaceMember
@@ -109,9 +110,9 @@ def _load_duckdb():
 def _load_dataset_df(dataset_id: Union[str, int], db: Session, workspace_id: int):
     """Load a dataset as a pandas DataFrame — handles both disk and DB-stored files.
 
-    Always scoped to workspace_id so a node referencing a dataset from a
-    different workspace can't be used to pull or join in data the caller
-    isn't a member of.
+    Scoped to workspace_id (or the global shared-dataset account) so a node
+    referencing a dataset from an unrelated workspace can't be used to pull
+    or join in data the caller isn't a member of.
     """
     import os
     try:
@@ -119,7 +120,7 @@ def _load_dataset_df(dataset_id: Union[str, int], db: Session, workspace_id: int
     except (ValueError, TypeError):
         did = dataset_id  # type: ignore[assignment]
 
-    ds = db.query(Dataset).filter(Dataset.id == did, Dataset.workspace_id == workspace_id).first()
+    ds = db.query(Dataset).filter(Dataset.id == did, dataset_visibility_filter(db, workspace_id)).first()
     if not ds:
         raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
 

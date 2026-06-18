@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..auth import get_current_active_user
+from ..dataset_access import dataset_visibility_filter
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
 from ..models.dataset import Dataset
@@ -98,7 +99,7 @@ def _get_ready_datasets(wid: int, db: Session, load_data: bool = False) -> list[
     q = (
         db.query(Dataset)
         .filter(
-            Dataset.workspace_id == wid,
+            dataset_visibility_filter(db, wid),
             Dataset.status == "ready",
             or_(Dataset.file_data.isnot(None), Dataset.file_path.isnot(None)),
         )
