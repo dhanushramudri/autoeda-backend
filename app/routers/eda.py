@@ -402,16 +402,11 @@ def get_quality_score(
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "quality_score"}
-    cached = get_cached_result(db, dataset_id, "quality_score", cache_key, ds.content_hash or "")
-    if cached:
-        return QualityScore(**cached)
 
     try:
         df = _load_df(ds)
         from ..eda.quality_score import run_quality_score
         result = _run_isolated(run_quality_score, df)
-        store_result(db, dataset_id, "quality_score", cache_key, result, ds.content_hash or "")
         return QualityScore(**result)
     except HTTPException:
         raise
