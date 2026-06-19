@@ -728,7 +728,6 @@ def generate_report(
       <div class="q-item"><div class="q-val">{quality.get("completeness",0)}</div><div class="q-lbl">Completeness</div></div>
       <div class="q-item"><div class="q-val">{quality.get("consistency",0)}</div><div class="q-lbl">Consistency</div></div>
       <div class="q-item"><div class="q-val">{quality.get("uniqueness",0)}</div><div class="q-lbl">Uniqueness</div></div>
-      <div class="q-item"><div class="q-val">{quality.get("validity",0)}</div><div class="q-lbl">Validity</div></div>
     </div>
   </div>
 

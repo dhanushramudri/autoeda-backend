@@ -73,21 +73,13 @@ def run_quality_score(df: pd.DataFrame) -> dict:
             })
             suggestions.append(f"Drop ID column '{col['name']}' before ML modeling")
 
-    # Validity
-    validity = 85
-    for col in profile["columns"]:
-        if col["semantic_type"] == "numeric" and col.get("skewness") and abs(col["skewness"]) > 3:
-            validity -= 3
-    validity = max(0, min(100, validity))
-
-    overall = int(completeness * 0.4 + consistency * 0.2 + uniqueness * 0.2 + validity * 0.2)
+    overall = int(completeness * 0.5 + consistency * 0.25 + uniqueness * 0.25)
 
     return {
         "overall": overall,
         "completeness": completeness,
         "consistency": consistency,
         "uniqueness": uniqueness,
-        "validity": validity,
         "issues": issues[:20],
         "suggestions": list(dict.fromkeys(suggestions))[:10],
     }

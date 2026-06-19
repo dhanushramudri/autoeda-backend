@@ -213,7 +213,6 @@ class QualityScore(BaseModel):
     completeness: int
     consistency: int
     uniqueness: int
-    validity: int
     issues: list[dict[str, Any]]
     suggestions: list[str]
 
