@@ -7,6 +7,7 @@ from ..auth import (
     get_password_hash,
     verify_password,
 )
+from ..config import settings
 from ..database import get_db
 from ..models.user import User
 from ..schemas.auth import LoginRequest, MicrosoftMockLoginRequest, PasswordChange, ProfileUpdate, TokenResponse, UserCreate, UserResponse
@@ -66,10 +67,23 @@ def microsoft_mock_login(
     user = db.query(User).filter(User.email == email).first()
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Email {email} is not authorized. Please contact an administrator.",
-        )
+        domain = email.rsplit("@", 1)[-1]
+        if settings.AUTO_PROVISION_EMAIL_DOMAIN and domain == settings.AUTO_PROVISION_EMAIL_DOMAIN:
+            user = User(
+                email=email,
+                full_name=full_name,
+                hashed_password=get_password_hash("microsoft_auth_placeholder"),
+                is_active=True,
+                is_admin=False,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Email {email} is not authorized. Please contact an administrator.",
+            )
 
     if not user.is_active:
         raise HTTPException(

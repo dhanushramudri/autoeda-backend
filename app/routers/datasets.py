@@ -495,6 +495,10 @@ def transform_dataset(
     ds.file_data = csv_bytes
     ds.file_size_bytes = len(csv_bytes)
     ds.file_path = (ds.file_path or "").rsplit(".", 1)[0] + ".csv" if ds.file_path else "transformed.csv"
+    ds.content_hash = hashlib.md5(csv_bytes).hexdigest()
+    ds.row_count = len(df)
+    ds.column_count = len(df.columns)
+    ds.schema_info = json.dumps({col: str(dtype) for col, dtype in df.dtypes.items()})
     db.commit()
 
     return {

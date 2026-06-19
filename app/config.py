@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # Store raw env values
     ADMIN_EMAILS: str = ""
     MICROSOFT_EMAILS: str = ""
+    AUTO_PROVISION_EMAIL_DOMAIN: str = "jmangroup.com"
 
     # Datasets uploaded by this account are visible & fully editable in every
     # workspace, regardless of membership — a shared template/sample library.
