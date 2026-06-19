@@ -94,8 +94,11 @@ class AddCommentRequest(BaseModel):
     parent_id: int | None = None
 
 
-class UpdateStatusRequest(BaseModel):
-    status: str
+class UpdateFeedbackRequest(BaseModel):
+    status: str | None = None
+    subject: str | None = None
+    message: str | None = None
+    rating: int | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -442,36 +445,50 @@ def delete_comment(
 # ── Status update (admin) ─────────────────────────────────────────────────────
 
 @router.patch("/feedback/{feedback_id}", response_model=FeedbackOut)
-def update_status(
+def update_feedback(
     feedback_id: int,
-    payload: UpdateStatusRequest,
+    payload: UpdateFeedbackRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    if payload.status not in VALID_STATUSES:
-        raise HTTPException(status_code=422, detail=f"Invalid status. Must be one of: {', '.join(VALID_STATUSES)}")
-
     fb = db.query(Feedback).filter(Feedback.id == feedback_id).first()
     if not fb:
         raise HTTPException(status_code=404, detail="Feedback not found")
 
-    old_status = fb.status
-    fb.status = payload.status
-    db.commit()
+    if payload.status is not None:
+        if not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Admin only")
+        if payload.status not in VALID_STATUSES:
+            raise HTTPException(status_code=422, detail=f"Invalid status. Must be one of: {', '.join(VALID_STATUSES)}")
 
-    # Log status change as a system comment
-    status_label = payload.status.replace("_", " ").title()
-    system_comment = FeedbackComment(
-        feedback_id=feedback_id,
-        user_id=current_user.id,
-        content=f"Status changed from **{old_status.replace('_', ' ').title()}** to **{status_label}**",
-        is_system=True,
-    )
-    db.add(system_comment)
-    db.commit()
+        old_status = fb.status
+        fb.status = payload.status
+        db.commit()
+
+        # Log status change as a system comment
+        status_label = payload.status.replace("_", " ").title()
+        db.add(FeedbackComment(
+            feedback_id=feedback_id,
+            user_id=current_user.id,
+            content=f"Status changed from **{old_status.replace('_', ' ').title()}** to **{status_label}**",
+            is_system=True,
+        ))
+        db.commit()
+
+    if payload.message is not None or payload.subject is not None or payload.rating is not None:
+        is_owner = fb.user_email == current_user.email
+        if not is_owner and not current_user.is_admin:
+            raise HTTPException(status_code=403, detail="Only the author or an admin can edit this feedback")
+
+        if payload.message is not None:
+            if len(payload.message.strip()) < 5:
+                raise HTTPException(status_code=422, detail="Message must be at least 5 characters.")
+            fb.message = payload.message.strip()
+        if payload.subject is not None:
+            fb.subject = payload.subject.strip() or None
+        if payload.rating is not None:
+            fb.rating = payload.rating
+        db.commit()
+
     db.refresh(fb)
-
     return _enrich([fb], current_user.id, db)[0]
