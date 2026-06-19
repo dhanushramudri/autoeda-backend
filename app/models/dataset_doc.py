@@ -55,15 +55,33 @@ class DocArticleDataset(Base):
 
 
 class DocAttachment(Base):
-    """A file attached to an article. Bytes stored in the DB (not disk) —
-    consistent with Dataset.file_data, since EC2/containers are ephemeral."""
+    """A file attached to an article. Stored in S3 (s3_key) so uploads/downloads
+    go straight browser<->S3, bypassing the Vercel proxy's 4.5MB body limit.
+    file_data is a legacy fallback for attachments uploaded before S3 support
+    was added — kept nullable so old rows still read back fine."""
     __tablename__ = "doc_attachments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     article_id: Mapped[int] = mapped_column(Integer, ForeignKey("doc_articles.id", ondelete="CASCADE"), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    file_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    s3_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    file_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     uploaded_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DocAttachmentUpload(Base):
+    """A pending presigned S3 upload, tracked so we can validate the file
+    actually landed (matching size) before exposing it as a real attachment."""
+    __tablename__ = "doc_attachment_uploads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[int] = mapped_column(Integer, ForeignKey("doc_articles.id", ondelete="CASCADE"), nullable=False)
+    s3_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    expected_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

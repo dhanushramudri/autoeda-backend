@@ -41,6 +41,21 @@ class DocAttachmentResponse(BaseModel):
     uploaded_at: datetime
 
 
+class AttachmentPresignRequest(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    file_size_bytes: int
+
+
+class AttachmentPresignResponse(BaseModel):
+    upload_id: int
+    upload_url: str
+
+
+class AttachmentConfirmRequest(BaseModel):
+    upload_id: int
+
+
 class DocArticleCreate(BaseModel):
     category_id: int
     title: str

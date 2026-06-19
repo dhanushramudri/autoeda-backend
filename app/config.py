@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     SHAREPOINT_SHEET: str = "Sheet1"
     SHAREPOINT_TABLE: str = "FeedbackTable"
 
+    # S3 — Dataset Library attachments are uploaded/downloaded via presigned
+    # URLs straight to/from S3, bypassing the Vercel proxy's body size limit.
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "eu-north-1"
+    S3_ATTACHMENTS_BUCKET: str = ""
+
 
     @property
     def admin_emails_list(self) -> list[str]:

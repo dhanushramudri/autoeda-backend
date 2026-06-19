@@ -8,17 +8,22 @@ shared) to see its details or download it.
 """
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
 from ..dataset_access import accessible_datasets_query, has_dataset_access
 from ..database import get_db
 from ..models.dataset import Dataset
-from ..models.dataset_doc import DocArticle, DocArticleDataset, DocAttachment, DocCategory
+from ..models.dataset_doc import (
+    DocArticle, DocArticleDataset, DocAttachment, DocAttachmentUpload, DocCategory,
+)
 from ..models.user import User
+from ..s3_attachments import delete_object, head_object, new_object_key, presign_get, presign_put, put_object_bytes
 from ..schemas.dataset_doc import (
+    AttachmentConfirmRequest,
+    AttachmentPresignRequest,
+    AttachmentPresignResponse,
     DocArticleCreate,
     DocArticleListItem,
     DocArticleResponse,
@@ -249,31 +254,77 @@ def delete_article(
 
 
 # ── Attachments ──────────────────────────────────────────────────────────────
+#
+# Uploads go straight from the browser to S3 via a presigned URL (init here →
+# PUT to S3 → confirm here), never through this API's own request body — the
+# Vercel proxy in front of this backend caps bodies at ~4.5MB, which a 100MB
+# dataset attachment would blow straight through.
 
-MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024  # 25MB
+MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024  # 100MB
 
 
-@router.post("/doc-articles/{article_id}/attachments", response_model=DocAttachmentResponse, status_code=201)
-async def upload_attachment(
+@router.post("/doc-articles/{article_id}/attachments/presign", response_model=AttachmentPresignResponse, status_code=201)
+def presign_attachment_upload(
     article_id: int,
-    file: UploadFile = File(...),
+    body: AttachmentPresignRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     a = db.query(DocArticle).filter(DocArticle.id == article_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Article not found")
+    if body.file_size_bytes > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail="Attachment exceeds 100MB limit")
+    if body.file_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="Empty file")
 
-    content = await file.read()
-    if len(content) > MAX_ATTACHMENT_BYTES:
-        raise HTTPException(status_code=413, detail="Attachment exceeds 25MB limit")
+    key = new_object_key(article_id, body.filename or "attachment")
+    pending = DocAttachmentUpload(
+        article_id=article_id, s3_key=key, filename=body.filename or "attachment",
+        content_type=body.content_type, expected_size_bytes=body.file_size_bytes,
+        created_by=current_user.id,
+    )
+    db.add(pending)
+    db.commit()
+    db.refresh(pending)
+
+    return AttachmentPresignResponse(
+        upload_id=pending.id,
+        upload_url=presign_put(key, body.content_type),
+    )
+
+
+@router.post("/doc-articles/{article_id}/attachments/confirm", response_model=DocAttachmentResponse, status_code=201)
+def confirm_attachment_upload(
+    article_id: int,
+    body: AttachmentConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    pending = (
+        db.query(DocAttachmentUpload)
+        .filter(DocAttachmentUpload.id == body.upload_id, DocAttachmentUpload.article_id == article_id)
+        .first()
+    )
+    if not pending:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    meta = head_object(pending.s3_key)
+    if not meta:
+        raise HTTPException(status_code=400, detail="File not found in storage — upload may have failed")
+    actual_size = meta.get("ContentLength", 0)
+    if actual_size != pending.expected_size_bytes:
+        delete_object(pending.s3_key)
+        db.delete(pending)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Uploaded file size doesn't match — please retry")
 
     att = DocAttachment(
-        article_id=article_id, filename=file.filename or "attachment",
-        content_type=file.content_type, file_data=content,
-        file_size_bytes=len(content), uploaded_by=current_user.id,
+        article_id=article_id, filename=pending.filename, content_type=pending.content_type,
+        s3_key=pending.s3_key, file_size_bytes=actual_size, uploaded_by=current_user.id,
     )
     db.add(att)
+    db.delete(pending)
     db.commit()
     db.refresh(att)
     return DocAttachmentResponse(
@@ -290,14 +341,24 @@ def download_attachment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """Always returns JSON {download_url}, not a redirect: the Vercel proxy in
+    front of this API follows redirects itself (server-side fetch), which
+    would pull the whole file through the proxy again. Returning the URL as
+    data lets the browser navigate to S3 directly instead.
+
+    Attachments from before S3 support (bytes still in file_data) are lazily
+    migrated to S3 on first download, so every attachment ends up on the same
+    code path — no separate streaming branch to maintain."""
     att = db.query(DocAttachment).filter(DocAttachment.id == attachment_id).first()
     if not att:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    return StreamingResponse(
-        iter([att.file_data]),
-        media_type=att.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{att.filename}"'},
-    )
+    if not att.s3_key:
+        key = new_object_key(att.article_id, att.filename)
+        put_object_bytes(key, att.file_data, att.content_type)
+        att.s3_key = key
+        att.file_data = None
+        db.commit()
+    return {"download_url": presign_get(att.s3_key, att.filename)}
 
 
 @router.delete("/doc-attachments/{attachment_id}", status_code=204)
@@ -311,6 +372,8 @@ def delete_attachment(
         raise HTTPException(status_code=404, detail="Attachment not found")
     if not current_user.is_admin and att.uploaded_by != current_user.id:
         raise HTTPException(status_code=403, detail="Only the uploader or an admin can remove this attachment")
+    if att.s3_key:
+        delete_object(att.s3_key)
     db.delete(att)
     db.commit()
 
