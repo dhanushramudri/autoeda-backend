@@ -217,12 +217,6 @@ class QualityScore(BaseModel):
     suggestions: list[str]
 
 
-class InsightCard(BaseModel):
-    chart_type: str
-    insight: str
-    severity: str  # info | warning | danger
-
-
 class JobStatus(BaseModel):
     job_id: str
     status: str

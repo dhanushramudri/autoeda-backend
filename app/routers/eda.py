@@ -15,7 +15,6 @@ from ..schemas.eda import (
     CorrelationResult,
     DistributionResult,
     FeatureImportanceResult,
-    InsightCard,
     MissingResult,
     OutlierResult,
     ProfileResult,
@@ -408,37 +407,6 @@ def get_quality_score(
         from ..eda.quality_score import run_quality_score
         result = _run_isolated(run_quality_score, df)
         return QualityScore(**result)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{dataset_id}/insights", response_model=list[InsightCard])
-def get_insights(
-    dataset_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    ds = _get_authorized_dataset(dataset_id, current_user, db)
-    try:
-        df = _load_df(ds)
-        from ..eda.profiler import run_profile
-        from ..eda.quality_score import run_quality_score
-        from ..eda.correlations import run_correlations
-        from ..insights import InsightEngine
-
-        profile = _run_isolated(run_profile, df)
-        quality = _run_isolated(run_quality_score, df)
-        correlations = _run_isolated(run_correlations, df)
-
-        engine = InsightEngine()
-        insights = (
-            engine.from_profile(profile)
-            + engine.from_correlations(correlations)
-            + engine.from_quality_score(quality)
-        )
-        return [InsightCard(**i) for i in insights[:20]]
     except HTTPException:
         raise
     except Exception as e:

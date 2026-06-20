@@ -1,7 +1,9 @@
 """
 LLM router — selects provider based on available API keys.
 
-Priority: OPENAI_API_KEY → GEMINI_API_KEY → None
+Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY → GEMINI_API_KEY → None
+(Claude is the intended production provider; Gemini is the local-dev
+fallback while no paid key is configured.)
 
 Adding a new provider later:
   1. Create app/ai/providers/<name>.py implementing LLMProvider
@@ -25,8 +27,14 @@ def _build_provider() -> Optional[LLMProvider]:
     # then fall back to raw os.environ for keys not declared in Settings.
     from ..config import settings
 
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
+
+    if anthropic_key:
+        from .providers.claude import ClaudeProvider
+        logger.info("AI provider: Claude")
+        return ClaudeProvider()
 
     if openai_key:
         from .providers.openai_provider import OpenAIProvider
@@ -38,7 +46,7 @@ def _build_provider() -> Optional[LLMProvider]:
         logger.info("AI provider: Gemini")
         return GeminiProvider()
 
-    logger.warning("No AI provider configured — set OPENAI_API_KEY or GEMINI_API_KEY")
+    logger.warning("No AI provider configured — set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
     return None
 
 

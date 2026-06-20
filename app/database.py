@@ -42,7 +42,7 @@ def init_db():
         user, workspace, dataset, job,
         pipeline_step, column_metadata, data_quality_rule,
         eda_run, saved_chart, named_segment, data_source, feedback,
-        dataset_doc,
+        dataset_doc, scout, hypothesis,
     )
     # When using Alembic this is a no-op safety net for fresh installs only.
     # Run `alembic upgrade head` for proper migrations.

@@ -35,3 +35,5 @@ vaderSentiment>=3.3.2
 duckdb>=0.10.0
 sqlglot>=23.0.0
 google-genai>=1.0.0
+openai>=1.40.0
+anthropic>=0.40.0

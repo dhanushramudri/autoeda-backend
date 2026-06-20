@@ -1,13 +1,15 @@
 import warnings as _warnings
 import numpy as np
 import pandas as pd
+from scipy import stats as _stats
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.feature_selection import (
     mutual_info_classif, mutual_info_regression,
-    f_classif, f_regression,
 )
 from sklearn.preprocessing import LabelEncoder
 from sklearn.inspection import permutation_importance
+
+from .correlations import _cramers_v, _eta_squared, _point_biserial
 
 def _uniform_threshold(n_features: int) -> float:
     """Importance level a feature would have if all were equally important."""
@@ -15,6 +17,9 @@ def _uniform_threshold(n_features: int) -> float:
 
 
 EXPENSIVE_METHOD_SAMPLE_CAP = 3000
+INTERACTION_SAMPLE_CAP = 300
+REDUNDANCY_TOP_K = 20
+REDUNDANCY_THRESHOLD = 0.9
 
 
 def _sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int = EXPENSIVE_METHOD_SAMPLE_CAP, seed: int = 42):
@@ -24,25 +29,128 @@ def _sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int = EXPENSIVE_METHOD_SAM
     return X.iloc[idx], y[idx]
 
 
+def _assoc(s1: pd.Series, s2: pd.Series, s1_num: bool, s2_num: bool) -> tuple[float | None, float | None]:
+    """
+    Statistically appropriate association strength between two series, routed by type
+    so the result is never a Pearson correlation or F-test computed on an arbitrary
+    integer label-encoding of unordered categories.
+
+    Returns (association, f_score):
+      numeric x numeric              -> Pearson r (signed),           f_regression-equivalent F
+      numeric x categorical (2 lvl)   -> point-biserial r (signed),   same F formula, derived from r
+      numeric x categorical (3+ lvl)  -> eta = sqrt(eta-squared) (unsigned), real one-way ANOVA F-statistic
+      categorical x categorical       -> Cramer's V (unsigned),       None (chi-square isn't an F-statistic)
+    """
+    tmp = pd.concat([s1, s2], axis=1).dropna()
+    if len(tmp) < 5:
+        return None, None
+    a, b = tmp.iloc[:, 0], tmp.iloc[:, 1]
+
+    if s1_num and s2_num:
+        try:
+            r = float(a.corr(b))
+        except Exception:
+            return None, None
+        if np.isnan(r):
+            return None, None
+        n = len(tmp)
+        f = (r ** 2) / max(1 - r ** 2, 1e-12) * (n - 2) if n > 2 else None
+        return round(r, 4), (round(float(f), 4) if f is not None else None)
+
+    if s1_num != s2_num:
+        num_s, cat_s = (a, b) if s1_num else (b, a)
+        n_levels = cat_s.nunique()
+        if n_levels < 2:
+            return None, None
+        if n_levels == 2:
+            r, _ = _point_biserial(num_s, cat_s)
+            if r is None:
+                return None, None
+            n = len(tmp)
+            f = (r ** 2) / max(1 - r ** 2, 1e-12) * (n - 2) if n > 2 else None
+            return r, (round(float(f), 4) if f is not None else None)
+        f_stat = None
+        try:
+            groups = [g.values for _, g in num_s.groupby(cat_s)]
+            groups = [g for g in groups if len(g) >= 2]
+            if len(groups) >= 2:
+                f_raw, _ = _stats.f_oneway(*groups)
+                if not np.isnan(f_raw):
+                    f_stat = float(f_raw)
+        except Exception:
+            f_stat = None
+        eta_sq = _eta_squared(num_s, cat_s)
+        eta = round(float(np.sqrt(eta_sq)), 4) if eta_sq is not None else None
+        return eta, (round(f_stat, 4) if f_stat is not None else None)
+
+    # categorical x categorical -> Cramer's V; no F-statistic equivalent exists for this pairing
+    try:
+        ct = pd.crosstab(a, b)
+        v = _cramers_v(ct)
+        return v, None
+    except Exception:
+        return None, None
+
+
+def _group_redundant(pairs: list[tuple[str, str, float]]) -> list[dict]:
+    """Cluster features connected by a high pairwise association into redundancy groups
+    (connected components over the 'highly associated' graph)."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    edge_strength: dict[tuple[str, str], float] = {}
+    for a, b, strength in pairs:
+        union(a, b)
+        key = (a, b) if a < b else (b, a)
+        edge_strength[key] = max(edge_strength.get(key, 0.0), strength)
+
+    clusters: dict[str, list[str]] = {}
+    for node in parent:
+        clusters.setdefault(find(node), []).append(node)
+
+    groups = []
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        member_set = set(members)
+        max_corr = max(
+            (s for (a, b), s in edge_strength.items() if a in member_set and b in member_set),
+            default=0.0,
+        )
+        groups.append({"features": sorted(members), "max_correlation": round(float(max_corr), 4)})
+    groups.sort(key=lambda g: g["max_correlation"], reverse=True)
+    return groups
+
+
 def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | None = None) -> dict:
     """
     Run feature importance analysis with lazy loading support.
-    
+
     Args:
         df: Input dataframe
         target: Target column name
         methods: List of methods to compute. If None, compute only ['rf', 'metadata'].
                  Available: ['rf', 'correlation', 'mi', 'anova', 'permutation', 'shap', 'stability', 'interactions']
-    
+
     Returns:
         dict with computed results. 'computed_methods' field tracks which methods were computed.
     """
     # Default: only load RF and metadata on first call (fast)
     if methods is None:
         methods = ['rf', 'metadata']
-    
+
     methods_set = set(methods)
-    
+
     empty = {
         "target": target,
         "problem_type": "unknown",
@@ -86,6 +194,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         )
     else:
         problem_type = "classification"
+    target_is_numeric = problem_type == "regression"
 
     # ── Class distribution ────────────────────────────────────────────────────
     class_distribution = None
@@ -106,6 +215,9 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
 
     # ── Feature matrix preparation ────────────────────────────────────────────
     feature_cols = [c for c in df_clean.columns if c != target]
+    is_numeric_orig: dict[str, bool] = {
+        c: bool(pd.api.types.is_numeric_dtype(df_clean[c])) for c in feature_cols
+    }
 
     # Capture raw meta BEFORE encoding (for missingness, unique counts)
     raw_meta: dict[str, dict] = {}
@@ -141,6 +253,8 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         }
 
     y_aligned = y_enc[: len(X)]
+    # Which encoded columns were originally categorical -> tells MI to use the discrete estimator
+    discrete_mask = [not is_numeric_orig.get(str(c), True) for c in X.columns]
 
     # ── Random Forest (FAST - always compute) ─────────────────────────────────
     rf_importances: list[dict] = []
@@ -148,11 +262,13 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     model_score = None
     clf = None
     computed = ["metadata"]
-    
-    if ("shap" in methods_set or "stability" in methods_set or 
-    "interactions" in methods_set or "permutation" in methods_set):
-        methods_set.add("rf")  
 
+    if ("shap" in methods_set or "stability" in methods_set or
+    "interactions" in methods_set or "permutation" in methods_set):
+        methods_set.add("rf")
+
+    cv_score_mean = None
+    cv_score_std = None
     if "rf" in methods_set or "permutation" in methods_set or "shap" in methods_set:
         try:
             clf = (
@@ -173,6 +289,25 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         except Exception:
             pass
 
+    # Real held-out k-fold CV, distinct from OOB: OOB still only ever sees this one
+    # forest's out-of-bag rows, whereas this refits independently per fold.
+    if "rf" in methods_set and clf is not None:
+        try:
+            from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
+            if problem_type == "classification":
+                min_class_count = int(pd.Series(y_aligned).value_counts().min())
+                n_folds = max(2, min(5, min_class_count))
+                splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            else:
+                n_folds = max(2, min(5, n_samples // 20))
+                splitter = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+            cv_clf = clf.__class__(**clf.get_params())
+            scores = cross_val_score(cv_clf, X, y_aligned, cv=splitter, n_jobs=-1)
+            cv_score_mean = round(float(scores.mean()), 4)
+            cv_score_std = round(float(scores.std()), 4)
+        except Exception:
+            pass
+
     # ── Mutual Information (MEDIUM - optional) ────────────────────────────────
     mi_scores: list[dict] = []
     mi_map: dict[str, float] = {}
@@ -181,7 +316,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
             fn = mutual_info_classif if problem_type == "classification" else mutual_info_regression
             with _warnings.catch_warnings():
                 _warnings.simplefilter("ignore")
-                mi = fn(X, y_aligned, random_state=42)
+                mi = fn(X, y_aligned, discrete_features=discrete_mask, random_state=42)
             for feat, score in zip(X.columns, mi):
                 mi_map[str(feat)] = round(float(score), 6)
             mi_scores = sorted(
@@ -192,43 +327,32 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         except Exception:
             pass
 
-    # ── Pearson correlation with target ───────────────────────────────────────
+    # ── Correlation / ANOVA — type-routed association with target ────────────
+    # Computed together: a categorical feature is never Pearson-correlated or
+    # F-tested against an arbitrary label-encoding of its own categories.
     correlations: list[dict] = []
-    corr_map: dict[str, float] = {}
-    if "correlation" in methods_set:
-        y_series = pd.Series(y_aligned, index=X.index)
-        for col in X.columns:
-            try:
-                val = float(X[col].corr(y_series))
-                if not np.isnan(val):
-                    corr_map[str(col)] = round(val, 4)
-            except Exception:
-                pass
-        correlations = sorted(
-            [{"feature": f, "correlation": v} for f, v in corr_map.items()],
-            key=lambda x: abs(x["correlation"]), reverse=True,
-        )
-        computed.append("correlation")
-
-    # ── ANOVA F-score (MEDIUM) ────────────────────────────────────────────────
     anova: list[dict] = []
+    corr_map: dict[str, float] = {}
     anova_map: dict[str, float] = {}
-    if "anova" in methods_set:
-        try:
-            fn_a = f_classif if problem_type == "classification" else f_regression
-            with _warnings.catch_warnings():
-                _warnings.simplefilter("ignore")
-                f_scores, _ = fn_a(X, y_aligned)
-            for feat, fscore in zip(X.columns, f_scores):
-                if not np.isnan(fscore) and not np.isinf(fscore):
-                    anova_map[str(feat)] = round(float(fscore), 4)
+    if "correlation" in methods_set or "anova" in methods_set:
+        for col in feature_cols:
+            assoc_val, f_val = _assoc(df_clean[col], y_raw, is_numeric_orig[col], target_is_numeric)
+            if assoc_val is not None:
+                corr_map[col] = assoc_val
+            if f_val is not None:
+                anova_map[col] = f_val
+        if "correlation" in methods_set:
+            correlations = sorted(
+                [{"feature": f, "correlation": v} for f, v in corr_map.items()],
+                key=lambda x: abs(x["correlation"]), reverse=True,
+            )
+            computed.append("correlation")
+        if "anova" in methods_set:
             anova = sorted(
                 [{"feature": f, "f_score": v} for f, v in anova_map.items()],
                 key=lambda x: x["f_score"], reverse=True,
             )
             computed.append("anova")
-        except Exception:
-            pass
 
     # ── Ranking maps (1 = best) ───────────────────────────────────────────────
     rf_rank   = {item["feature"]: i + 1 for i, item in enumerate(rf_importances)}
@@ -330,6 +454,49 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
             "level": "info",
         })
 
+    # ── Leakage suspects — features with a near-deterministic relationship to the
+    # target. This is a statistical heuristic (a "suspect", not a verdict): a feature
+    # this strongly associated with the target is either a duplicate/derived column,
+    # a direct proxy, or genuinely a near-perfect predictor — only the user has the
+    # domain context to tell which. Only runs once a real target association has
+    # actually been computed (gated on corr_map, not on the raw 'methods' string).
+    leakage_suspects: list[dict] = []
+    if corr_map:
+        for fm in feature_meta:
+            v = fm["correlation"]
+            if v is None:
+                continue
+            av = abs(v)
+            if av >= 0.97:
+                leakage_suspects.append({
+                    "feature": fm["feature"],
+                    "reason": f"Near-perfect relationship with target (association={av:.3f}) — likely a duplicate, derived value, or direct proxy of the target.",
+                    "severity": "high",
+                })
+            elif av >= 0.90:
+                leakage_suspects.append({
+                    "feature": fm["feature"],
+                    "reason": f"Unusually strong relationship with target (association={av:.3f}) — verify this column would actually be available at prediction time.",
+                    "severity": "medium",
+                })
+        computed.append("leakage")
+
+    # ── Redundant feature groups — features highly associated with EACH OTHER
+    # (not the target), clustered by connected components. Restricted to the
+    # features most associated with the target to bound the O(k^2) pairwise cost
+    # and to focus on redundancy that actually matters for modelling decisions.
+    redundant_groups: list[dict] = []
+    if corr_map and n_features >= 2:
+        top_k_cols = sorted(corr_map.keys(), key=lambda c: abs(corr_map[c]), reverse=True)[:REDUNDANCY_TOP_K]
+        edges: list[tuple[str, str, float]] = []
+        for i, fa in enumerate(top_k_cols):
+            for fb in top_k_cols[i + 1:]:
+                strength, _ = _assoc(df_clean[fa], df_clean[fb], is_numeric_orig[fa], is_numeric_orig[fb])
+                if strength is not None and abs(strength) >= REDUNDANCY_THRESHOLD:
+                    edges.append((fa, fb, abs(strength)))
+        redundant_groups = _group_redundant(edges)
+        computed.append("redundancy")
+
     perm_importances: list[dict] = []
     if "permutation" in methods_set and clf is not None:
         try:
@@ -386,7 +553,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
                 clf_boot.fit(X_boot, y_boot)
                 for feat, imp in zip(X.columns, clf_boot.feature_importances_):
                     bootstrap_importances[str(feat)].append(imp)
-            
+
             for feat in X.columns:
                 imps = bootstrap_importances[str(feat)]
                 mean_imp = np.mean(imps)
@@ -403,35 +570,46 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         except Exception:
             pass
 
+    # ── Feature interactions — real SHAP interaction values (Lundberg et al.), not
+    # a stand-in formula. shap_interaction_values returns, per pair (i, j), how much
+    # of the prediction is attributable to i and j acting together rather than
+    # independently — the actual definition of "interaction" the UI claims to show.
     interactions: list[dict] = []
     if "interactions" in methods_set and n_features >= 3 and n_samples >= 100 and clf is not None:
         try:
-            from itertools import combinations
+            import shap
+            X_int, _ = _sample_rows(X, y_aligned, cap=INTERACTION_SAMPLE_CAP)
+            explainer = shap.TreeExplainer(clf)
+            inter_vals = explainer.shap_interaction_values(X_int)
+            if isinstance(inter_vals, list):
+                inter_arr = np.mean([np.abs(iv) for iv in inter_vals], axis=0)
+            elif isinstance(inter_vals, np.ndarray) and inter_vals.ndim == 4:
+                inter_arr = np.abs(inter_vals).mean(axis=3)
+            else:
+                inter_arr = np.abs(inter_vals)
+            mean_inter = inter_arr.mean(axis=0)  # (n_features, n_features)
+
+            cols = list(X.columns)
             top_features_for_interaction = [f["feature"] for f in rf_importances[:8]]
-            
+            from itertools import combinations
             for feat_a, feat_b in combinations(top_features_for_interaction, 2):
-                idx_a = list(X.columns).index(feat_a)
-                idx_b = list(X.columns).index(feat_b)
-                
-                a_alone = rf_importances[idx_a]["importance"]
-                b_alone = rf_importances[idx_b]["importance"]
-                
-                combined = a_alone + b_alone + abs(X[feat_a].corr(X[feat_b]) * 0.1)
-                
-                interaction_score = max(0, combined - a_alone - b_alone)
-                
+                idx_a = cols.index(feat_a)
+                idx_b = cols.index(feat_b)
+                a_alone = float(mean_inter[idx_a, idx_a])
+                b_alone = float(mean_inter[idx_b, idx_b])
+                interaction_score = float(mean_inter[idx_a, idx_b])
+                combined = a_alone + b_alone + interaction_score
                 interactions.append({
                     "feature_a": feat_a,
                     "feature_b": feat_b,
-                    "interaction_score": round(float(interaction_score), 6),
-                    "a_alone": round(float(a_alone), 6),
-                    "b_alone": round(float(b_alone), 6),
-                    "combined": round(float(combined), 6),
+                    "interaction_score": round(interaction_score, 6),
+                    "a_alone": round(a_alone, 6),
+                    "b_alone": round(b_alone, 6),
+                    "combined": round(combined, 6),
                 })
             computed.append("interactions")
         except Exception:
             pass
-
 
     perm_map = {item["feature"]: item["importance"] for item in perm_importances}
     shap_map = {item["feature"]: item["mean_abs_shap"] for item in shap_values_list}
@@ -447,8 +625,8 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         "n_samples": n_samples,
         "n_features": n_features,
         "model_score": model_score,
-        "cv_score_mean": None,
-        "cv_score_std": None,
+        "cv_score_mean": cv_score_mean,
+        "cv_score_std": cv_score_std,
         "class_distribution": class_distribution,
         "importances": rf_importances[:20],
         "permutation_importances": perm_importances[:20],
@@ -462,7 +640,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         "top_features": top_features,
         "drop_candidates": drop_candidates,
         "warnings": warnings_list,
-        "redundant_groups": [],
-        "leakage_suspects": [],
+        "redundant_groups": redundant_groups,
+        "leakage_suspects": leakage_suspects,
         "computed_methods": computed,
     }
