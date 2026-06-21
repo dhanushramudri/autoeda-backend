@@ -61,6 +61,22 @@ Production runs via the included `Dockerfile` (`alembic upgrade head` then `uvic
 
 **Heavy computation isolation**: CPU/memory-heavy analysis runs in a separate process pool so one crash or OOM can't take down the API server.
 
+## Architecture
+
+**External services:**
+- **AWS RDS (PostgreSQL)** — primary database (SQLAlchemy + Alembic migrations).
+- **AWS S3** — presigned-URL uploads/downloads for large files (attachments, Scout images), bypassing the frontend proxy's body-size limit.
+- **Claude / OpenAI / Gemini** — LLM providers behind one interface; whichever key is set first (in that priority order) is the active provider for Scout and Hypotheses.
+- **Azure AD / SharePoint** — service-principal auth for the existing SharePoint integration.
+- **Vercel (frontend)** — the Next.js frontend calls this API through its own proxy route, not directly.
+
+**In-process, not separate services** (no message broker or external cache is actually in the loop)
+- **DuckDB** — the SQL engine behind Warehouse, Join Builder, and the SQL Editor; runs in-process against loaded dataframes, no external server.
+- **A bounded process pool** — isolates CPU/memory-heavy EDA computation from the main API process.
+- **A thread pool + an in-memory event bus** — background jobs and real-time notifications; both reset on restart, neither is backed by Redis or a queue.
+
+**Deployment**: Docker container on EC2, built from the included `Dockerfile`.
+
 ## Project Structure
 
 ```
