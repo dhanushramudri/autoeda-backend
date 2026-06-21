@@ -462,50 +462,6 @@ def get_rule_results(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PIVOT TABLE
-# ══════════════════════════════════════════════════════════════════════════════
-
-@router.get("/datasets/{dataset_id}/pivot")
-def get_pivot(
-    dataset_id: int,
-    row_col: str,
-    col_col: str,
-    value_col: str,
-    agg_func: str = "sum",
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    ds = _get_ds(dataset_id, current_user, db)
-    agg_map = {
-        "sum": "sum", "mean": "mean", "count": "count",
-        "min": "min", "max": "max",
-    }
-    agg = agg_map.get(agg_func, "sum")
-    try:
-        df = _load_df(ds)
-        for c in [row_col, col_col, value_col]:
-            if c not in df.columns:
-                raise HTTPException(400, f"Column '{c}' not found")
-
-        pivot = df.pivot_table(
-            index=row_col,
-            columns=col_col,
-            values=value_col,
-            aggfunc=agg,
-            fill_value=0,
-        )
-        return {
-            "index": [str(x) for x in pivot.index.tolist()],
-            "columns": [str(x) for x in pivot.columns.tolist()],
-            "data": pivot.values.tolist(),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # DATASET JOIN
 # ══════════════════════════════════════════════════════════════════════════════
 
