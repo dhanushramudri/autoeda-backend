@@ -54,11 +54,28 @@ def presign_get(key: str, filename: str) -> str:
     )
 
 
+def presign_get_inline(key: str) -> str:
+    """Like presign_get, but without forcing a download — for content meant to
+    render directly in the page (e.g. a Scout chat image), not be saved as a file."""
+    return _client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.S3_ATTACHMENTS_BUCKET, "Key": key},
+        ExpiresIn=PRESIGN_EXPIRES_IN,
+    )
+
+
 def put_object_bytes(key: str, data: bytes, content_type: str | None) -> None:
     _client().put_object(
         Bucket=settings.S3_ATTACHMENTS_BUCKET, Key=key, Body=data,
         ContentType=content_type or "application/octet-stream",
     )
+
+
+def get_object_bytes(key: str) -> bytes | None:
+    try:
+        return _client().get_object(Bucket=settings.S3_ATTACHMENTS_BUCKET, Key=key)["Body"].read()
+    except Exception:
+        return None
 
 
 def head_object(key: str) -> dict | None:

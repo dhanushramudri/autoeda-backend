@@ -89,11 +89,33 @@ def _trim_for_llm(result: dict) -> str:
     return text
 
 
-def _build_messages(workspace_id: int, history: list[dict[str, str]], message: str) -> list[dict[str, Any]]:
+def _resolve_image(image: dict[str, Any] | None) -> dict[str, str] | None:
+    """Fetches an attached image's bytes from S3 and base64-encodes them for the
+    provider. Called once, for the current turn's message only — history replay
+    never re-resolves past images, so one attachment doesn't silently inflate the
+    token cost of every later turn in the same conversation."""
+    if not image or not image.get("key"):
+        return None
+    import base64
+    from ...s3_attachments import get_object_bytes
+
+    data = get_object_bytes(image["key"])
+    if not data:
+        return None
+    return {"media_type": image.get("media_type") or "image/png", "data": base64.b64encode(data).decode()}
+
+
+def _build_messages(
+    workspace_id: int, history: list[dict[str, str]], message: str, image: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(workspace_id)}]
     for h in history[-12:]:
         messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": message})
+    user_msg: dict[str, Any] = {"role": "user", "content": message}
+    resolved_image = _resolve_image(image)
+    if resolved_image:
+        user_msg["image"] = resolved_image
+    messages.append(user_msg)
     return messages
 
 
@@ -155,14 +177,17 @@ def run_agent_turn(
     db: Session,
     user: User,
     mode: str = "agent",
+    image: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run one user turn synchronously. Returns {"answer": str, "tool_trace": [...]}."""
+    """Run one user turn synchronously. Returns {"answer": str, "tool_trace": [...]}.
+    `image`, if given, is {"key": str, "media_type": str} — an S3 reference, not raw
+    bytes; resolved (fetched + base64-encoded) once inside _build_messages."""
     provider = get_provider()
     if provider is None:
         return {"answer": _NO_PROVIDER_MSG, "tool_trace": []}
 
     max_iterations = _MAX_ITERATIONS_AGENT if mode == "agent" else _MAX_ITERATIONS_CHAT
-    messages = _build_messages(workspace_id, history, message)
+    messages = _build_messages(workspace_id, history, message, image=image)
     tool_trace: list[dict[str, Any]] = []
     final_content: str | None = None
 
@@ -189,6 +214,7 @@ def run_agent_turn_stream(
     db: Session,
     user: User,
     mode: str = "agent",
+    image: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Streaming variant. Yields progress events as they happen:
       {"type": "tool_call", "tool": str, "arguments": dict}
@@ -204,6 +230,8 @@ def run_agent_turn_stream(
     tools needed" produces a throwaway answer, which stream_text then
     regenerates for real, streamed output. That's the accepted cost of true
     token streaming without fragile incremental tool-call-argument parsing.
+
+    `image`, if given, is {"key": str, "media_type": str} — see run_agent_turn.
     """
     provider = get_provider()
     if provider is None:
@@ -211,7 +239,7 @@ def run_agent_turn_stream(
         return
 
     max_iterations = _MAX_ITERATIONS_AGENT if mode == "agent" else _MAX_ITERATIONS_CHAT
-    messages = _build_messages(workspace_id, history, message)
+    messages = _build_messages(workspace_id, history, message, image=image)
     tool_trace: list[dict[str, Any]] = []
     ready_content: str | None = None
 

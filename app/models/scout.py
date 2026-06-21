@@ -30,6 +30,8 @@ class ScoutMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     mode: Mapped[str | None] = mapped_column(String(10), nullable=True)  # agent | chat (assistant messages only)
     tool_trace_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    image_content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

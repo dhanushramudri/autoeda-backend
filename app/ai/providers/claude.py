@@ -1,6 +1,6 @@
 """Claude provider using the Anthropic SDK — the intended production provider.
 
-Claude's Messages API differs from OpenAI's in two structural ways this file
+Claude's Messages API differs from OpenAI's in three structural ways this file
 has to bridge to fit the shared (OpenAI-shaped) internal message format used
 by the orchestrator:
   1. The system prompt is a top-level `system` param, not a message.
@@ -8,6 +8,11 @@ by the orchestrator:
      one `tool_result` content block per tool call — Claude's API requires
      strict user/assistant alternation, so consecutive tool-result messages
      can't be sent as separate turns the way OpenAI/Gemini allow.
+  3. Images ride on an internal message's optional `image` key (set only on
+     the current turn — see orchestrator._resolve_image) and get expanded into
+     a `[{"type": "image", ...}, {"type": "text", ...}]` content list. This is
+     currently the only provider that looks for that key — OpenAI/Gemini stay
+     text-only until/unless they get the same treatment.
 """
 import logging
 import os
@@ -45,7 +50,17 @@ def _to_claude_messages(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
 
         flush_tool_results()
         if role == "user":
-            claude_messages.append({"role": "user", "content": m.get("content") or ""})
+            image = m.get("image")
+            if image:
+                content: list[dict[str, Any]] = [{
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": image["media_type"], "data": image["data"]},
+                }]
+                if m.get("content"):
+                    content.append({"type": "text", "text": m["content"]})
+                claude_messages.append({"role": "user", "content": content})
+            else:
+                claude_messages.append({"role": "user", "content": m.get("content") or ""})
         elif role == "assistant":
             if m.get("tool_calls"):
                 content: list[dict[str, Any]] = []
