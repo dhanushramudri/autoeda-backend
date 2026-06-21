@@ -597,28 +597,48 @@ def run_correlations(df: pd.DataFrame, method: str = "pearson") -> dict:
 # Auto-insights
 # ─────────────────────────────────────────────────────────────────────────────
 
+_METHOD_LABEL = {"pearson": "Pearson", "spearman": "Spearman rank", "kendall": "Kendall rank"}
+
+
 def _generate_insights(r: dict) -> list[dict]:
     insights: list[dict] = []
+    method_label = _METHOD_LABEL.get(r.get("method", "pearson"), "Pearson")
 
-    # High numeric correlations
+    # High numeric correlations — a high |r| is only reported as evidence of a
+    p_values = r.get("p_values", {})
     for pair in r.get("top_pairs", [])[:5]:
         abs_r = pair["abs_correlation"]
-        if abs_r >= 0.9:
+        if abs_r < 0.7:
+            continue
+        p_val = p_values.get(pair["col1"], {}).get(pair["col2"])
+        significant = p_val is not None and p_val < 0.05
+        if not significant:
+            insights.append({
+                "type": "muted",
+                "category": "numeric",
+                "message": (
+                    f"**{pair['col1']}** and **{pair['col2']}** have a high {method_label} "
+                    f"coefficient ({pair['correlation']:+.3f}) but it is not statistically significant"
+                    + (f" (p={p_val:.3f})" if p_val is not None else " (p-value unavailable)")
+                    + " — likely noise from limited overlapping data, not a real relationship."
+                ),
+            })
+        elif abs_r >= 0.9:
             insights.append({
                 "type": "warning",
                 "category": "numeric",
                 "message": (
                     f"Very strong {'positive' if pair['correlation'] > 0 else 'negative'} "
-                    f"correlation ({pair['correlation']:+.3f}) between "
+                    f"{method_label} correlation ({pair['correlation']:+.3f}, p={p_val:.3f}) between "
                     f"**{pair['col1']}** and **{pair['col2']}** — possible redundancy."
                 ),
             })
-        elif abs_r >= 0.7:
+        else:
             insights.append({
                 "type": "info",
                 "category": "numeric",
                 "message": (
-                    f"Strong correlation ({pair['correlation']:+.3f}) between "
+                    f"Strong {method_label} correlation ({pair['correlation']:+.3f}, p={p_val:.3f}) between "
                     f"**{pair['col1']}** and **{pair['col2']}**."
                 ),
             })
@@ -646,27 +666,57 @@ def _generate_insights(r: dict) -> list[dict]:
             })
 
     # High Cramér's V
+    cat_p_values = r.get("cat_p_values", {})
     for pair in r.get("cat_top_pairs", [])[:3]:
-        if pair["cramers_v"] >= 0.7:
+        if pair["cramers_v"] < 0.7:
+            continue
+        p_val = cat_p_values.get(pair["col1"], {}).get(pair["col2"])
+        significant = p_val is not None and p_val < 0.05
+        if not significant:
+            insights.append({
+                "type": "muted",
+                "category": "categorical",
+                "message": (
+                    f"**{pair['col1']}** and **{pair['col2']}** show a high Cramér's V "
+                    f"({pair['cramers_v']:.3f}) but it is not statistically significant"
+                    + (f" (p={p_val:.3f})" if p_val is not None else " (p-value unavailable)")
+                    + " — likely noise from limited data, not a real association."
+                ),
+            })
+        else:
             insights.append({
                 "type": "warning",
                 "category": "categorical",
                 "message": (
-                    f"Strong categorical association (Cramér's V = {pair['cramers_v']:.3f}) "
+                    f"Strong categorical association (Cramér's V = {pair['cramers_v']:.3f}, p={p_val:.3f}) "
                     f"between **{pair['col1']}** and **{pair['col2']}** — may indicate redundant categories."
                 ),
             })
 
-    # High mixed associations
     for pair in r.get("mixed_top_pairs", [])[:3]:
         eta = pair.get("eta_sq")
-        if eta is not None and eta >= 0.14:
+        if eta is None or eta < 0.14:
+            continue
+        p_val = pair.get("p_value")
+        significant = p_val is not None and p_val < 0.05
+        if not significant:
+            insights.append({
+                "type": "muted",
+                "category": "mixed",
+                "message": (
+                    f"**{pair['cat_col']}** appears to explain {eta * 100:.1f}% of variance in "
+                    f"**{pair['num_col']}** (η² = {eta:.3f}) but it is not statistically significant"
+                    + (f" (p={p_val:.3f})" if p_val is not None else " (p-value unavailable)")
+                    + " — likely noise from limited data or too few samples per group."
+                ),
+            })
+        else:
             insights.append({
                 "type": "info",
                 "category": "mixed",
                 "message": (
                     f"**{pair['cat_col']}** explains {eta * 100:.1f}% of variance in "
-                    f"**{pair['num_col']}** (η² = {eta:.3f}) — strong group-level difference."
+                    f"**{pair['num_col']}** (η² = {eta:.3f}, p={p_val:.3f}) — strong group-level difference."
                 ),
             })
 
