@@ -21,6 +21,7 @@ from ..schemas.dataset import (
     DatasetResponse,
     DatasetUploadPresignRequest,
     DatasetUploadPresignResponse,
+    ImportDatasetRequest,
 )
 
 router = APIRouter(tags=["datasets"])
@@ -348,6 +349,60 @@ def preview_dataset_shorthand(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/datasets/{dataset_id}/import", response_model=DatasetCreateResponse, status_code=status.HTTP_201_CREATED)
+def import_dataset_to_workspace(
+    dataset_id: int,
+    payload: ImportDatasetRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Copy a dataset (e.g. one linked from the Dataset Library) into one of
+    the current user's own workspaces — a fresh, independent Dataset row with
+    its own copy of the bytes, not a reference to the original."""
+    source = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(source, current_user, db)
+    if not source.file_data:
+        raise HTTPException(status_code=400, detail="This dataset has no file data to import")
+
+    _assert_member(payload.workspace_id, current_user, db, ["admin", "analyst"])
+
+    ds = Dataset(
+        workspace_id=payload.workspace_id,
+        name=source.name,
+        description=source.description,
+        source_type="file",
+        source_config=source.source_config,
+        status="processing",
+        created_by=current_user.id,
+        file_data=source.file_data,
+        content_hash=source.content_hash,
+        file_size_bytes=source.file_size_bytes,
+        file_path=source.file_path,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    job_id = str(uuid.uuid4())
+    job = BackgroundJob(
+        id=job_id, job_type="eda_pipeline", status="pending", progress=0,
+        dataset_id=ds.id, created_by=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+
+    config = json.loads(ds.source_config or "{}")
+    from ..tasks import run_eda_pipeline
+    background_tasks.add_task(run_eda_pipeline, job_id, ds.id, None, config)
+
+    resp = DatasetCreateResponse.model_validate(ds)
+    resp.job_id = job_id
+    return resp
 
 
 @router.post("/datasets/{dataset_id}/transform")

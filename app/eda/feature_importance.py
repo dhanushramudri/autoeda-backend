@@ -18,6 +18,7 @@ def _uniform_threshold(n_features: int) -> float:
 
 EXPENSIVE_METHOD_SAMPLE_CAP = 3000
 INTERACTION_SAMPLE_CAP = 300
+INTERACTION_MAX_FEATURES = 30
 REDUNDANCY_TOP_K = 20
 REDUNDANCY_THRESHOLD = 0.9
 
@@ -575,7 +576,17 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     # of the prediction is attributable to i and j acting together rather than
     # independently — the actual definition of "interaction" the UI claims to show.
     interactions: list[dict] = []
-    if "interactions" in methods_set and n_features >= 3 and n_samples >= 100 and clf is not None:
+    if (
+        "interactions" in methods_set
+        and 3 <= n_features <= INTERACTION_MAX_FEATURES
+        and n_samples >= 100
+        and clf is not None
+    ):
+        # shap_interaction_values computes a full (n_features x n_features) tensor
+        # regardless of how few pairs we end up reporting — cost grows roughly
+        # quadratically with feature count on top of the tree-based SHAP cost, so
+        # on wide datasets this can run effectively unbounded (observed: a single
+        # call held a process-pool worker for over an hour in production).
         try:
             import shap
             X_int, _ = _sample_rows(X, y_aligned, cap=INTERACTION_SAMPLE_CAP)

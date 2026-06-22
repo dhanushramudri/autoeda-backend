@@ -56,6 +56,11 @@ class AttachmentConfirmRequest(BaseModel):
     upload_id: int
 
 
+class ImportAttachmentRequest(BaseModel):
+    workspace_id: int
+    name: Optional[str] = None
+
+
 class DocArticleCreate(BaseModel):
     category_id: int
     title: str

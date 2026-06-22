@@ -48,3 +48,7 @@ class DatasetUploadPresignRequest(BaseModel):
 class DatasetUploadPresignResponse(BaseModel):
     s3_key: str
     upload_url: str
+
+
+class ImportDatasetRequest(BaseModel):
+    workspace_id: int

@@ -47,6 +47,9 @@ def shutdown_pool() -> None:
     global _pool
     with _lock:
         if _pool is not None:
+            for proc in list(getattr(_pool, "_processes", {}).values()):
+                if proc.is_alive():
+                    proc.kill()
             _pool.shutdown(wait=False, cancel_futures=True)
             _pool = None
 
@@ -61,7 +64,8 @@ def run_isolated(fn, *args, timeout: float = DEFAULT_TIMEOUT_SECONDS, **kwargs):
     try:
         return future.result(timeout=timeout)
     except FutureTimeoutError:
-        future.cancel()
+        logger.error("Analysis exceeded %.0fs — killing stuck worker by restarting the pool", timeout)
+        shutdown_pool()
         raise AnalysisTimeout(f"Analysis timed out after {timeout:.0f}s")
     except BrokenExecutor:
         logger.error("EDA process pool crashed (likely OOM) — restarting pool")

@@ -6,9 +6,12 @@ an article to a dataset never grants new access to that dataset — viewers
 still need real workspace membership (or the dataset must be globally
 shared) to see its details or download it.
 """
+import hashlib
+import json
 import re
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
@@ -18,8 +21,13 @@ from ..models.dataset import Dataset
 from ..models.dataset_doc import (
     DocArticle, DocArticleDataset, DocAttachment, DocAttachmentUpload, DocCategory,
 )
+from ..models.job import BackgroundJob
 from ..models.user import User
-from ..s3_attachments import delete_object, head_object, new_object_key, presign_get, presign_put, put_object_bytes
+from ..models.workspace import WorkspaceMember
+from ..s3_attachments import (
+    delete_object, get_object_bytes, head_object, new_object_key, presign_get, presign_put, put_object_bytes,
+)
+from ..schemas.dataset import DatasetCreateResponse
 from ..schemas.dataset_doc import (
     AttachmentConfirmRequest,
     AttachmentPresignRequest,
@@ -31,6 +39,7 @@ from ..schemas.dataset_doc import (
     DocAttachmentResponse,
     DocCategoryCreate,
     DocCategoryResponse,
+    ImportAttachmentRequest,
     LinkedDataset,
 )
 
@@ -376,6 +385,70 @@ def delete_attachment(
         delete_object(att.s3_key)
     db.delete(att)
     db.commit()
+
+
+@router.post(
+    "/doc-attachments/{attachment_id}/import",
+    response_model=DatasetCreateResponse,
+    status_code=201,
+)
+def import_attachment_to_workspace(
+    attachment_id: int,
+    payload: ImportAttachmentRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Copy a raw file attachment (e.g. a CSV someone attached to an article)
+    into one of the current user's workspaces as a real Dataset, with full EDA."""
+    att = db.query(DocAttachment).filter(DocAttachment.id == attachment_id).first()
+    if not att:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    if not current_user.is_admin:
+        member = db.query(WorkspaceMember).filter(
+            WorkspaceMember.workspace_id == payload.workspace_id,
+            WorkspaceMember.user_id == current_user.id,
+        ).first()
+        if not member or member.role not in ("admin", "analyst"):
+            raise HTTPException(status_code=403, detail="Not authorized to add datasets to that workspace")
+
+    content = get_object_bytes(att.s3_key) if att.s3_key else att.file_data
+    if not content:
+        raise HTTPException(status_code=400, detail="Could not read this attachment's file data")
+
+    name = (payload.name or "").strip() or re.sub(r"\.[^.]+$", "", att.filename) or att.filename
+
+    ds = Dataset(
+        workspace_id=payload.workspace_id,
+        name=name,
+        source_type="file",
+        source_config="{}",
+        status="processing",
+        created_by=current_user.id,
+        file_data=content,
+        content_hash=hashlib.md5(content).hexdigest(),
+        file_size_bytes=len(content),
+        file_path=att.filename,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    job_id = str(uuid.uuid4())
+    job = BackgroundJob(
+        id=job_id, job_type="eda_pipeline", status="pending", progress=0,
+        dataset_id=ds.id, created_by=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+
+    from ..tasks import run_eda_pipeline
+    background_tasks.add_task(run_eda_pipeline, job_id, ds.id, None, {})
+
+    resp = DatasetCreateResponse.model_validate(ds)
+    resp.job_id = job_id
+    return resp
 
 
 # ── Dataset picker + reverse lookup ────────────────────────────────────────
