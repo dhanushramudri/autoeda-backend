@@ -101,17 +101,15 @@ def _migrate_feedback_comment_parent():
 
 
 def _promote_jman_admins():
-    """Ensure specific @jmangroup.com accounts are always admins."""
+    """Ensure the accounts listed in ADMIN_EMAILS are always admins."""
     from .models.user import User
 
-    ADMIN_EMAILS = set(settings.admin_emails_list) if settings.ADMIN_EMAILS else {
-        "admin@jmangroup.com",
-        "autoeda@jmangroup.com",
-        "dhanush.r@jmangroup.com",
-    }
+    admin_emails = set(settings.admin_emails_list)
+    if not admin_emails:
+        return
     db = SessionLocal()
     try:
-        for email in ADMIN_EMAILS:
+        for email in admin_emails:
             user = db.query(User).filter(User.email == email).first()
             if user and not user.is_admin:
                 user.is_admin = True

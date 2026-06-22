@@ -21,7 +21,8 @@ class Settings(BaseSettings):
 
     # Datasets uploaded by this account are visible & fully editable in every
     # workspace, regardless of membership — a shared template/sample library.
-    GLOBAL_DATASET_EMAIL: str = "autoeda@jmangroup.com"
+    # Empty disables the feature entirely (dataset_access.py handles this).
+    GLOBAL_DATASET_EMAIL: str = ""
 
     GEMINI_API_KEY: str = ""
 

@@ -1,0 +1,26 @@
+# Secrets — never bake these into the image. Production config comes from
+# `docker run --env-file` on EC2, not from anything copied in at build time.
+.env
+.env.*
+
+.git
+.gitignore
+
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+.venv/
+venv/
+env/
+
+.vscode/
+.idea/
+*.swp
+
+README.md
+desktop.ini
+uploads/
+app;C/
