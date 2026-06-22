@@ -37,3 +37,14 @@ class DatasetPreview(BaseModel):
 
 class DatasetCreateResponse(DatasetResponse):
     job_id: Optional[str] = None
+
+
+class DatasetUploadPresignRequest(BaseModel):
+    filename: str
+    content_type: Optional[str] = None
+    file_size_bytes: int
+
+
+class DatasetUploadPresignResponse(BaseModel):
+    s3_key: str
+    upload_url: str

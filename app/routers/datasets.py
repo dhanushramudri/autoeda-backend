@@ -14,9 +14,18 @@ from ..models.dataset import Dataset
 from ..models.job import BackgroundJob
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..schemas.dataset import DatasetCreateResponse, DatasetPreview, DatasetResponse
+from ..s3_attachments import delete_object, get_object_bytes, head_object, new_dataset_upload_key, presign_put
+from ..schemas.dataset import (
+    DatasetCreateResponse,
+    DatasetPreview,
+    DatasetResponse,
+    DatasetUploadPresignRequest,
+    DatasetUploadPresignResponse,
+)
 
 router = APIRouter(tags=["datasets"])
+
+MAX_DATASET_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB
 
 
 def _assert_member(workspace_id: int, user: User, db: Session, roles: list[str] = None):
@@ -114,6 +123,100 @@ async def create_dataset(
     background_tasks.add_task(run_eda_pipeline, job_id, dataset_id, file_path, config)
 
 
+
+    resp = DatasetCreateResponse.model_validate(ds)
+    resp.job_id = job_id
+    return resp
+
+
+@router.post(
+    "/workspaces/{workspace_id}/datasets/presign-upload",
+    response_model=DatasetUploadPresignResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def presign_dataset_upload(
+    workspace_id: int,
+    body: DatasetUploadPresignRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    _assert_member(workspace_id, current_user, db, ["admin", "analyst"])
+    if body.file_size_bytes > MAX_DATASET_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 100MB limit")
+    if body.file_size_bytes <= 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    key = new_dataset_upload_key(workspace_id, body.filename or "dataset")
+    return DatasetUploadPresignResponse(
+        s3_key=key,
+        upload_url=presign_put(key, body.content_type),
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/datasets/confirm-upload",
+    response_model=DatasetCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def confirm_dataset_upload(
+    workspace_id: int,
+    background_tasks: BackgroundTasks,
+    s3_key: str = Form(...),
+    original_filename: str = Form(...),
+    name: str = Form(...),
+    source_type: str = Form(...),
+    description: Optional[str] = Form(None),
+    config_json: Optional[str] = Form("{}"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    _assert_member(workspace_id, current_user, db, ["admin", "analyst"])
+
+    if not s3_key.startswith(f"dataset-uploads/{workspace_id}/"):
+        raise HTTPException(status_code=400, detail="Invalid upload reference")
+
+    meta = head_object(s3_key)
+    if not meta:
+        raise HTTPException(status_code=400, detail="Uploaded file not found in storage — please retry")
+    if meta.get("ContentLength", 0) > MAX_DATASET_UPLOAD_BYTES:
+        delete_object(s3_key)
+        raise HTTPException(status_code=413, detail="File exceeds 100MB limit")
+
+    content = get_object_bytes(s3_key)
+    delete_object(s3_key)
+    if content is None:
+        raise HTTPException(status_code=400, detail="Could not read uploaded file — please retry")
+
+    config = json.loads(config_json or "{}")
+    content_hash = hashlib.md5(content).hexdigest()
+
+    ds = Dataset(
+        workspace_id=workspace_id,
+        name=name,
+        description=description,
+        source_type=source_type,
+        source_config=json.dumps(config),
+        status="processing",
+        created_by=current_user.id,
+        file_data=content,
+        content_hash=content_hash,
+        file_size_bytes=len(content),
+        file_path=original_filename,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+
+    job_id = str(uuid.uuid4())
+    job = BackgroundJob(
+        id=job_id, job_type="eda_pipeline", status="pending", progress=0,
+        dataset_id=ds.id, created_by=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+
+    from ..tasks import run_eda_pipeline
+    background_tasks.add_task(run_eda_pipeline, job_id, ds.id, None, config)
 
     resp = DatasetCreateResponse.model_validate(ds)
     resp.job_id = job_id

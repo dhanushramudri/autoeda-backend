@@ -30,6 +30,13 @@ def new_object_key(article_id: int, filename: str) -> str:
     return f"doc-attachments/{article_id}/{uuid.uuid4().hex}-{safe_name}"
 
 
+def new_dataset_upload_key(workspace_id: int, filename: str) -> str:
+    """Transient relay key — the uploaded bytes get pulled back into
+    Dataset.file_data on confirm, then deleted from S3. Not permanent storage."""
+    safe_name = filename.replace("/", "_").replace("\\", "_")
+    return f"dataset-uploads/{workspace_id}/{uuid.uuid4().hex}-{safe_name}"
+
+
 def presign_put(key: str, content_type: str | None) -> str:
     return _client().generate_presigned_url(
         "put_object",
