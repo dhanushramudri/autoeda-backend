@@ -486,9 +486,18 @@ def _profile_columns(df: pd.DataFrame) -> dict:
 # Public entry-point
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_correlations(df: pd.DataFrame, method: str = "pearson") -> dict:
+ALL_CORR_METHODS = ["numeric", "categorical", "mixed"]
+DEFAULT_CORR_METHODS = ["numeric"]
+
+
+def run_correlations(df: pd.DataFrame, method: str = "pearson", methods: list[str] | None = None) -> dict:
     """
-    Compute all association measures for a mixed-type DataFrame.
+    Compute association measures for a mixed-type DataFrame, one independent
+    group at a time — mirrors feature_importance.py/timeseries.py's `methods`
+    lazy-loading pattern, so the frontend can render the numeric heatmap
+    immediately and load categorical/mixed associations (the more expensive,
+    uncapped pairwise tests — see module docstring) progressively in the
+    background instead of blocking on one call for everything.
 
     Every column in `df` is included. The only columns absent from a specific
     computation are those that are genuinely all-null (reported in
@@ -497,41 +506,21 @@ def run_correlations(df: pd.DataFrame, method: str = "pearson") -> dict:
 
     Parameters
     ----------
-    df     : Input DataFrame (any mix of numeric and categorical columns)
-    method : 'pearson' | 'spearman' | 'kendall'  (numeric×numeric only)
+    df      : Input DataFrame (any mix of numeric and categorical columns)
+    method  : 'pearson' | 'spearman' | 'kendall'  (numeric×numeric only)
+    methods : which group(s) to compute this call (default: just "numeric").
+              Available: numeric, categorical, mixed.
 
     Returns
     -------
-    dict with keys:
-      method           – requested method
-      column_profile   – {num_cols, cat_cols,
-                          ignored_cols  (always []),
-                          skipped_cols  (all-null only),
-                          coerced_cols  (unknown dtype → str),
-                          cat_cardinality}
-
-      # Numeric × Numeric
-      matrix           – correlation matrix  {col: {col: r}}
-      p_values         – p-value matrix      {col: {col: p}}
-      top_pairs        – list of top-25 numeric pairs by |r|
-      vif              – VIF scores (Pearson only; capped at MAX_VIF_COLS
-                         for runtime; includes a truncation note when capped)
-
-      # Categorical × Categorical
-      cramers_v        – bias-corrected Cramér's V matrix
-      theils_u         – Theil's U asymmetric matrix [row→col]
-      cat_p_values     – chi-square p-values
-      cat_top_pairs    – top Cramér's V pairs
-
-      # Numeric × Categorical
-      mixed            – full mixed association matrix
-      mixed_top_pairs  – top mixed pairs ranked by η²
-
-      # Summary
-      insights         – plain-language observations list
+    dict — only keys for the requested/applicable group(s) are present
+    (omitted keys are genuinely not computed this call, not empty); always
+    includes method, column_profile, insights (scoped to whatever groups are
+    present in this call), and computed_methods.
     """
     if method not in ("pearson", "spearman", "kendall"):
         method = "pearson"
+    methods_set = set(methods) if methods else set(DEFAULT_CORR_METHODS)
 
     profile = _profile_columns(df)
 
@@ -547,48 +536,42 @@ def run_correlations(df: pd.DataFrame, method: str = "pearson") -> dict:
     result: dict = {
         "method":         method,
         "column_profile": profile,
-
-        "matrix":     {},
-        "p_values":   {},
-        "top_pairs":  [],
-        "vif":        [],
-
-        "cramers_v":     {},
-        "theils_u":      {},
-        "cat_p_values":  {},
-        "cat_top_pairs": [],
-
-        "mixed":           {},
-        "mixed_top_pairs": [],
-
-        "insights": [],
     }
+    computed: list[str] = []
 
     # ── Numeric × Numeric ─────────────────────────────────────────────────────
-    if len(num_cols) >= 2:
+    if "numeric" in methods_set and len(num_cols) >= 2:
         num_result = compute_num_matrix(df_work, num_cols, method)
         result["matrix"]    = num_result["matrix"]
         result["p_values"]  = num_result["p_values"]
         result["top_pairs"] = _top_num_pairs(num_result["matrix"], num_result["columns"])
         if method == "pearson":
             result["vif"] = compute_vif(df_work, num_cols)
+        computed.append("numeric")
 
     # ── Categorical × Categorical ─────────────────────────────────────────────
-    if len(cat_cols) >= 2:
+    if "categorical" in methods_set and len(cat_cols) >= 2:
         cat_result = compute_cat_matrix(df_work, cat_cols)
         result["cramers_v"]     = cat_result["cramers_v"]
         result["theils_u"]      = cat_result["theils_u"]
         result["cat_p_values"]  = cat_result["p_values"]
         result["cat_top_pairs"] = _top_cat_pairs(cat_result["cramers_v"], cat_cols)
+        computed.append("categorical")
 
     # ── Numeric × Categorical ─────────────────────────────────────────────────
-    if len(num_cols) >= 1 and len(cat_cols) >= 1:
+    if "mixed" in methods_set and len(num_cols) >= 1 and len(cat_cols) >= 1:
         mixed_result = compute_mixed_matrix(df_work, num_cols, cat_cols)
         result["mixed"]           = mixed_result["matrix"]
         result["mixed_top_pairs"] = mixed_result["top_pairs"]
+        computed.append("mixed")
 
     # ── Insights ──────────────────────────────────────────────────────────────
+    # Scoped to whatever groups this call computed — _generate_insights()
+    # already reads each field via r.get(key, default), so it naturally
+    # produces only the insights its available data supports. The frontend
+    # concatenates+dedupes insights across progressive calls.
     result["insights"] = _generate_insights(result)
+    result["computed_methods"] = computed
 
     return result
 

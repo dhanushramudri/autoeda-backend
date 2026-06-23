@@ -110,6 +110,8 @@ class CorrelationResult(BaseModel):
 
     insights: Optional[list[dict[str, Any]]] = None
 
+    computed_methods: list[str] = []
+
 
 class OutlierResult(BaseModel):
     method: str

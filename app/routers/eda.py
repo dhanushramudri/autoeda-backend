@@ -162,15 +162,27 @@ def get_distributions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{dataset_id}/correlations", response_model=CorrelationResult)
+@router.get("/{dataset_id}/correlations", response_model=CorrelationResult, response_model_exclude_unset=True)
 def get_correlations(
     dataset_id: int,
     method: str = "pearson",
+    methods: str | None = None,  # comma-separated; default: "numeric" for a fast first render
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """
+    Lazy-loading correlations — mirrors /feature-importance and /timeseries.
+
+    Query params:
+    - methods: Optional comma-separated list of groups to compute.
+      Default (None): just 'numeric' (numeric×numeric matrix + VIF — fast).
+      Available: numeric, categorical, mixed.
+    """
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "correlations", "method": method,"v": 2}
+
+    methods_list = [m.strip().lower() for m in methods.split(",")] if methods else ["numeric"]
+
+    cache_key = {"type": "correlations", "method": method, "methods": sorted(methods_list), "v": 3}
     cached = get_cached_result(db, dataset_id, "correlations", cache_key, ds.content_hash or "")
     if cached:
         return CorrelationResult.model_validate(cached)
@@ -178,7 +190,7 @@ def get_correlations(
     try:
         df = _load_df(ds)
         from ..eda.correlations import run_correlations
-        result = _run_isolated(run_correlations, df, method)
+        result = _run_isolated(run_correlations, df, method, methods=methods_list)
         store_result(db, dataset_id, "correlations", cache_key, result, ds.content_hash or "")
         return CorrelationResult.model_validate(result)
     except HTTPException:
