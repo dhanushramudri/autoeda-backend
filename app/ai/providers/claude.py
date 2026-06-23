@@ -18,7 +18,7 @@ import logging
 import os
 from typing import Any, Iterator, Optional
 
-from .base import LLMProvider, ToolTurn
+from .base import LLMProvider, QuotaExceededError, ToolTurn, is_quota_error
 
 logger = logging.getLogger("autoeda.ai.providers.claude")
 
@@ -106,6 +106,8 @@ class ClaudeProvider(LLMProvider):
             text = "".join(b.text for b in response.content if b.type == "text")
             return text.strip() or None
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Claude generate failed: %s", e)
             return None
 
@@ -146,6 +148,8 @@ class ClaudeProvider(LLMProvider):
 
             return {"content": ("\n".join(text_parts).strip() or None) if not tool_calls else None, "tool_calls": tool_calls}
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Claude generate_with_tools failed: %s", e)
             return None
 
@@ -169,5 +173,7 @@ class ClaudeProvider(LLMProvider):
             ) as stream:
                 yield from stream.text_stream
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Claude stream_text failed: %s", e)
             return

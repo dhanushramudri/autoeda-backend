@@ -18,6 +18,7 @@ from typing import Any, Iterator
 from sqlalchemy.orm import Session
 
 from ..llm import get_provider
+from ..providers.base import QuotaExceededError
 from ...models.user import User
 from .tools import TOOL_SPECS, execute_tool
 
@@ -38,6 +39,7 @@ _NO_PROVIDER_MSG = "Scout needs an AI provider configured (ANTHROPIC_API_KEY, OP
 _UNREACHABLE_MSG = "Scout couldn't reach the AI provider. Please try again."
 _NO_ANSWER_MSG = "I wasn't able to find an answer."
 _RAN_OUT_MSG = "I gathered some data but ran out of steps to fully answer — try narrowing the question."
+_QUOTA_MSG = "AI quota reached — the AI provider's free-tier credits are exhausted for now. Please try again later."
 
 
 def _system_prompt(workspace_id: int) -> str:
@@ -143,7 +145,11 @@ def _run_tool_loop(
     stopped naturally, or None if the iteration cap was hit instead)."""
     specs = tool_specs if tool_specs is not None else TOOL_SPECS
     for _ in range(max_iterations):
-        turn = provider.generate_with_tools(messages, specs, temperature=temperature, max_tokens=max_tokens)
+        try:
+            turn = provider.generate_with_tools(messages, specs, temperature=temperature, max_tokens=max_tokens)
+        except QuotaExceededError:
+            yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
+            return
         if turn is None:
             yield {"type": "error", "message": _UNREACHABLE_MSG}
             return
@@ -201,7 +207,10 @@ def run_agent_turn(
         return {"answer": final_content, "tool_trace": tool_trace}
 
     # Iteration cap hit without a natural stop — ask once more for a final answer.
-    final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+    try:
+        final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+    except QuotaExceededError:
+        return {"answer": _QUOTA_MSG, "tool_trace": tool_trace}
     answer = (final["content"] if final else None) or _RAN_OUT_MSG
     return {"answer": answer, "tool_trace": tool_trace}
 
@@ -257,6 +266,9 @@ def run_agent_turn_stream(
         for chunk in provider.stream_text(messages, temperature=0.2, max_tokens=1536):
             full_answer += chunk
             yield {"type": "answer_chunk", "text": chunk}
+    except QuotaExceededError:
+        yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
+        return
     except NotImplementedError:
         full_answer = ""
 
@@ -265,7 +277,11 @@ def run_agent_turn_stream(
         # fall back to whatever non-streamed content is available, making one
         # more forced call only if the iteration cap was hit with no answer yet.
         if ready_content is None:
-            final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+            try:
+                final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+            except QuotaExceededError:
+                yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
+                return
             ready_content = (final["content"] if final else None) or _RAN_OUT_MSG
         full_answer = ready_content or _NO_ANSWER_MSG
         yield {"type": "answer_chunk", "text": full_answer}

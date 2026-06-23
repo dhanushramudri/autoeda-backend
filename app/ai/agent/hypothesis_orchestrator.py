@@ -29,8 +29,9 @@ from typing import Any, Iterator
 from sqlalchemy.orm import Session
 
 from ..llm import get_provider
+from ..providers.base import QuotaExceededError
 from ...models.user import User
-from .orchestrator import _run_tool_loop, _NO_PROVIDER_MSG
+from .orchestrator import _run_tool_loop, _NO_PROVIDER_MSG, _QUOTA_MSG
 from .tools import TOOL_SPECS
 
 logger = logging.getLogger("autoeda.ai.agent.hypothesis")
@@ -178,7 +179,10 @@ def run_hypothesis_validation(
 
     parsed = _parse_json_block(final_content) if final_content else None
     if parsed is None and final_content is not None:
-        parsed = _force_final_json(provider, messages, _VALIDATE_MAX_TOKENS)
+        try:
+            parsed = _force_final_json(provider, messages, _VALIDATE_MAX_TOKENS)
+        except QuotaExceededError:
+            return {"status": "error", "verdict": _QUOTA_MSG, "evidence_summary": None, "confidence": None, "columns": [], "tool_trace": tool_trace}
 
     if parsed is None:
         verdict = _INCONCLUSIVE_CAP_HIT if final_content is None else _PARSE_FAILURE_MSG
@@ -223,7 +227,11 @@ def run_hypothesis_validation_stream(
 
     parsed = _parse_json_block(final_content) if final_content else None
     if parsed is None and final_content is not None:
-        parsed = _force_final_json(provider, messages, _VALIDATE_MAX_TOKENS)
+        try:
+            parsed = _force_final_json(provider, messages, _VALIDATE_MAX_TOKENS)
+        except QuotaExceededError:
+            yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
+            return
 
     if parsed is None:
         verdict = _INCONCLUSIVE_CAP_HIT if final_content is None else _PARSE_FAILURE_MSG
@@ -268,7 +276,10 @@ def run_hypothesis_generation(
 
     parsed = _parse_json_block(final_content) if final_content else None
     if parsed is None and final_content is not None:
-        parsed = _force_final_json(provider, messages, _GENERATE_MAX_TOKENS)
+        try:
+            parsed = _force_final_json(provider, messages, _GENERATE_MAX_TOKENS)
+        except QuotaExceededError:
+            return {"hypotheses": [], "tool_trace": tool_trace, "error": _QUOTA_MSG}
     if not isinstance(parsed, list):
         return {"hypotheses": [], "tool_trace": tool_trace, "error": _PARSE_FAILURE_MSG if final_content else _INCONCLUSIVE_CAP_HIT}
 
@@ -303,7 +314,11 @@ def run_hypothesis_generation_stream(
 
     parsed = _parse_json_block(final_content) if final_content else None
     if parsed is None and final_content is not None:
-        parsed = _force_final_json(provider, messages, _GENERATE_MAX_TOKENS)
+        try:
+            parsed = _force_final_json(provider, messages, _GENERATE_MAX_TOKENS)
+        except QuotaExceededError:
+            yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
+            return
     if not isinstance(parsed, list):
         yield {"type": "error", "message": _PARSE_FAILURE_MSG if final_content else _INCONCLUSIVE_CAP_HIT}
         return

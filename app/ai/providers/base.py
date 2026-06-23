@@ -3,6 +3,26 @@ from abc import ABC, abstractmethod
 from typing import Any, Iterator, Optional, TypedDict
 
 
+class QuotaExceededError(Exception):
+    """Raised by a provider when the failure is specifically a rate-limit/quota/
+    billing error, as opposed to a generic outage — callers use this distinction
+    to show users an accurate "AI quota reached" message instead of a generic
+    "couldn't find an answer"."""
+
+
+def is_quota_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    msg = str(exc).lower()
+    return any(kw in msg for kw in (
+        "quota", "rate limit", "rate_limit", "resource_exhausted",
+        "credit balance", "insufficient_quota",
+    ))
+
+
 class ToolCall(TypedDict):
     id: str
     name: str

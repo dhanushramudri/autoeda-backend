@@ -258,6 +258,7 @@ def post_message_stream(
     def event_stream():
         full_answer = ""
         tool_trace: list[dict] = []
+        error_message: str | None = None
         for event in run_agent_turn_stream(
             message=payload.message, history=history, workspace_id=workspace_id,
             db=db, user=current_user, mode=payload.mode, image=image,
@@ -265,11 +266,13 @@ def post_message_stream(
             if event["type"] == "done":
                 full_answer = event["answer"]
                 tool_trace = event["tool_trace"]
+            elif event["type"] == "error":
+                error_message = event.get("message")
             yield f"data: {json.dumps(event, default=str)}\n\n"
 
         assistant_msg = ScoutMessage(
             conversation_id=convo.id, role="assistant",
-            content=full_answer or "I wasn't able to find an answer.",
+            content=full_answer or error_message or "I wasn't able to find an answer.",
             mode=payload.mode,
             tool_trace_json=json.dumps(tool_trace, default=str),
         )

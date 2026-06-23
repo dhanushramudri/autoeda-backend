@@ -218,11 +218,14 @@ def validate_hypothesis_stream(
 
     def event_stream():
         outcome: dict | None = None
+        error_message: str | None = None
         for event in run_hypothesis_validation_stream(
             statement=statement, workspace_id=workspace_id, dataset_id=dataset_id, db=db, user=current_user,
         ):
             if event["type"] == "result":
                 outcome = {**event["hypothesis"], "tool_trace": event["tool_trace"]}
+            elif event["type"] == "error":
+                error_message = event.get("message")
             yield f"data: {json.dumps(event, default=str)}\n\n"
 
         row = _get_hypothesis(workspace_id, hypothesis_id, db)
@@ -230,6 +233,7 @@ def validate_hypothesis_stream(
             row = _apply_validation(row, outcome, db)
         else:
             row.status = "error"
+            row.verdict = error_message or "Validation failed — please try again."
             db.add(row)
             db.commit()
         yield f"data: {json.dumps({'type': 'persisted', 'id': row.id})}\n\n"

@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Any, Iterator, Optional
 
-from .base import LLMProvider, ToolTurn
+from .base import LLMProvider, QuotaExceededError, ToolTurn, is_quota_error
 
 logger = logging.getLogger("autoeda.ai.providers.gemini")
 
@@ -72,6 +72,8 @@ class GeminiProvider(LLMProvider):
             )
             return response.text.strip()
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Gemini generate failed: %s", e)
             return None
 
@@ -156,6 +158,8 @@ class GeminiProvider(LLMProvider):
 
             return {"content": ("\n".join(text_parts).strip() or None) if not tool_calls else None, "tool_calls": tool_calls}
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Gemini generate_with_tools failed: %s", e)
             return None
 
@@ -186,5 +190,7 @@ class GeminiProvider(LLMProvider):
                 if chunk.text:
                     yield chunk.text
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("Gemini stream_text failed: %s", e)
             return

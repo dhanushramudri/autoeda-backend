@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any, Iterator, Optional
 
-from .base import LLMProvider, ToolTurn
+from .base import LLMProvider, QuotaExceededError, ToolTurn, is_quota_error
 
 logger = logging.getLogger("autoeda.ai.providers.openai")
 
@@ -64,6 +64,8 @@ class OpenAIProvider(LLMProvider):
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("OpenAI generate failed: %s", e)
             return None
 
@@ -106,6 +108,8 @@ class OpenAIProvider(LLMProvider):
 
             return {"content": (choice.content or "").strip() or None, "tool_calls": []}
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("OpenAI generate_with_tools failed: %s", e)
             return None
 
@@ -134,5 +138,7 @@ class OpenAIProvider(LLMProvider):
                 if delta:
                     yield delta
         except Exception as e:
+            if is_quota_error(e):
+                raise QuotaExceededError(str(e)) from e
             logger.warning("OpenAI stream_text failed: %s", e)
             return
