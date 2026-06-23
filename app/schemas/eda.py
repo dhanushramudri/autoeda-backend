@@ -153,7 +153,7 @@ class TimeSeriesResult(BaseModel):
     start_date: str
     end_date: str
 
-    has_trend: bool
+    has_trend: bool = False
 
     seasonality: int | None = None
 
@@ -161,14 +161,19 @@ class TimeSeriesResult(BaseModel):
     adf_pvalue: float | None = None
     is_stationary: bool | None = None
 
-    line_data: dict[str, Any]
-    rolling: dict[str, Any]
+    line_data: dict[str, Any] = {}
+    rolling: dict[str, Any] = {}
 
     decomposition: dict[str, Any] | None = None
     acf: dict[str, Any] | None = None
     pacf: dict[str, Any] | None = None
 
     anomalies: list[dict[str, Any]] = []
+
+    # Which method group(s) this particular response computed (see
+    # eda/timeseries.py ALL_TS_METHODS) — the frontend merges successive
+    # progressive-load responses into one combined result keyed off this.
+    computed_methods: list[str] = []
 
     error: str | None = None
 

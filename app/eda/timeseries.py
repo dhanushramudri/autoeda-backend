@@ -513,7 +513,6 @@ def _change_point_detection(series: pd.Series, dates: list[str]) -> dict:
         import ruptures as rpt
 
         model = rpt.Pelt(model="rbf", min_size=max(2, len(s_sub) // 20)).fit(s_sub)
-
         pen = np.var(s_sub) * np.log(len(s_sub))
         bkps = model.predict(pen=pen)
         cps = [int(idx_map[b - 1]) for b in bkps[:-1] if 0 <= b - 1 < len(idx_map)]
@@ -874,37 +873,38 @@ def _forecasting_readiness(
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Main entry point — split into independently-callable method groups so the
+# frontend can render the chart immediately and load the rest progressively
+# (mirrors feature_importance.py's `methods` lazy-loading pattern), instead of
+# one giant blocking call that — on a large series — used to tie up a
+# process-pool worker for minutes (decomposition's STL, change-point
+# detection's bootstrap, and Granger causality's repeated OLS fits are the
+# expensive ones; the rest are cheap even on ~150k rows).
 # ---------------------------------------------------------------------------
 
+ALL_TS_METHODS = [
+    "overview", "stationarity", "decomposition", "acf_pacf",
+    "anomalies", "change_points", "granger", "readiness",
+]
+DEFAULT_TS_METHODS = ["overview"]
 
-def run_timeseries(df: pd.DataFrame, time_col: str, value_col: str) -> dict:
-    """
-    Full enterprise-grade time series analysis.
-    Returns a JSON-serialisable dict compatible with the existing API contract.
-    All new keys are additive — backwards compatible.
-    """
-    ERROR_TEMPLATE = {
-        "time_col": time_col, "value_col": value_col, "n_points": 0,
-        "start_date": "", "end_date": "", "has_trend": False,
-        "line_data": {}, "rolling": {}, "anomalies": [],
-    }
 
-    # Column validation
+def _prepare_series(df: pd.DataFrame, time_col: str, value_col: str):
+    """Shared, cheap setup (parse/sort/interpolate) — safe to redo on every
+    progressive call since it's a small fraction of the total cost."""
     if time_col not in df.columns or value_col not in df.columns:
-        return {**ERROR_TEMPLATE, "error": "Invalid columns"}
+        return None, "Invalid columns"
 
     df_ts = df[[time_col, value_col]].copy()
     try:
         df_ts[time_col] = pd.to_datetime(df_ts[time_col])
     except Exception:
-        return {**ERROR_TEMPLATE, "error": f"Cannot parse '{time_col}' as datetime"}
+        return None, f"Cannot parse '{time_col}' as datetime"
 
     df_ts = df_ts.sort_values(time_col).reset_index(drop=True)
     series_raw = df_ts[value_col]
-
     if series_raw.dropna().__len__() < 10:
-        return {**ERROR_TEMPLATE, "n_points": len(df_ts), "error": "Need at least 10 non-null data points"}
+        return None, "Need at least 10 non-null data points"
 
     series = (
         series_raw
@@ -914,82 +914,119 @@ def run_timeseries(df: pd.DataFrame, time_col: str, value_col: str) -> dict:
         .bfill()
     )
     dates = _fmt_dates(df_ts[time_col])
+    return (df_ts, series, dates), None
 
-    # Downsampled line data
-    dates_ds, values_ds = _downsample(dates, series.tolist())
-    line_data = {"dates": dates_ds, "values": _safe_list(values_ds)}
 
-    # Adaptive rolling window
-    window = max(3, len(series) // 20)
+def run_timeseries(df: pd.DataFrame, time_col: str, value_col: str, methods: list[str] | None = None) -> dict:
+    """
+    Enterprise-grade time series analysis, computed in independent groups.
 
-    # --- Run all analyses ---
-    quality = _data_quality(df_ts, time_col, value_col)
-    freq_seconds = quality.get("freq_seconds")
-    stats = _descriptive_stats(series)
-    normality = _normality_tests(series)
-    stationarity = _stationarity_tests(series)
-    diff_suggestions = _differencing_suggestions(series)
-    seasonality = _seasonality_tests(series)
-    decomp = _decomposition(
-        series,
-        dates,
-        seasonality.get("dominant_period")
-    )
-    acf_pacf = _acf_pacf(series)
-    spectral = _spectral_analysis(series, freq_seconds)
-    change_points = _change_point_detection(series, dates)
-    anomalies_full = _anomaly_detection(series, dates, window)
-    rolling = _rolling_stats(series, dates)
-    lag_analysis = _lag_analysis(series)
-    trend_tests = _trend_tests(series)
+    `methods`: which groups to compute this call (default: just "overview",
+    for a fast first render). Available: overview, stationarity,
+    decomposition, acf_pacf, anomalies, change_points, granger, readiness.
+    Each call is self-contained — the frontend merges successive partial
+    responses (keyed off `computed_methods`) into one combined result.
+    """
+    methods_set = set(methods) if methods else set(DEFAULT_TS_METHODS)
 
-    # Granger causality (other numeric columns vs target)
-    other_numeric = [
-        c for c in df.columns
-        if c != value_col and c != time_col and pd.api.types.is_numeric_dtype(df[c])
-    ]
-    granger = _granger_causality(df, value_col, other_numeric)
+    base = {
+        "time_col": time_col, "value_col": value_col, "n_points": 0,
+        "start_date": "", "end_date": "", "has_trend": False,
+        "line_data": {}, "rolling": {}, "anomalies": [], "computed_methods": [],
+    }
 
-    readiness = _forecasting_readiness(stationarity, decomp, acf_pacf, quality, trend_tests, seasonality)
+    prepared, err = _prepare_series(df, time_col, value_col)
+    if err:
+        return {**base, "error": err}
+    df_ts, series, dates = prepared
 
-    # --- Assemble response (backwards-compatible) ---
-    return {
-        # Legacy fields (unchanged contract)
-        "time_col": time_col,
-        "value_col": value_col,
+    result: dict[str, Any] = {
+        **base,
         "n_points": len(series),
         "start_date": dates[0],
         "end_date": dates[-1],
-        "has_trend": readiness["has_trend"],
-        "seasonality": seasonality.get("dominant_period"),
-        "adf_statistic": (stationarity.get("adf") or {}).get("statistic"),
-        "adf_pvalue": (stationarity.get("adf") or {}).get("pvalue"),
-        "is_stationary": (stationarity.get("adf") or {}).get("is_stationary"),
-        "line_data": line_data,
-        "rolling": {  # Legacy single-window rolling (kept for backwards compat)
+    }
+    computed: list[str] = []
+
+    if "overview" in methods_set:
+        dates_ds, values_ds = _downsample(dates, series.tolist())
+        result["line_data"] = {"dates": dates_ds, "values": _safe_list(values_ds)}
+        result["data_quality"] = _data_quality(df_ts, time_col, value_col)
+        result["descriptive_stats"] = _descriptive_stats(series)
+        result["normality_tests"] = _normality_tests(series)
+        computed.append("overview")
+
+    if "stationarity" in methods_set:
+        stationarity = _stationarity_tests(series)
+        seasonality = _seasonality_tests(series)
+        result["stationarity"] = stationarity
+        result["differencing_suggestions"] = _differencing_suggestions(series)
+        result["trend_tests"] = _trend_tests(series)
+        result["seasonality_tests"] = seasonality
+        result["seasonality"] = seasonality.get("dominant_period")
+        result["adf_statistic"] = (stationarity.get("adf") or {}).get("statistic")
+        result["adf_pvalue"] = (stationarity.get("adf") or {}).get("pvalue")
+        result["is_stationary"] = (stationarity.get("adf") or {}).get("is_stationary")
+        computed.append("stationarity")
+
+    if "decomposition" in methods_set:
+        # Cheap ACF-based period hint, recomputed locally rather than carried
+        # over from the "stationarity" group's response.
+        seasonality_hint = _seasonality_tests(series)
+        decomp = _decomposition(series, dates, seasonality_hint.get("dominant_period"))
+        result["decomposition"] = decomp
+        computed.append("decomposition")
+
+    if "acf_pacf" in methods_set:
+        acf_pacf = _acf_pacf(series)
+        quality = _data_quality(df_ts, time_col, value_col)
+        result["acf_pacf_full"] = acf_pacf
+        result["acf"] = acf_pacf.get("acf")
+        result["pacf"] = acf_pacf.get("pacf")
+        result["spectral"] = _spectral_analysis(series, quality.get("freq_seconds"))
+        computed.append("acf_pacf")
+
+    if "anomalies" in methods_set:
+        window = max(3, len(series) // 20)
+        anomalies_full = _anomaly_detection(series, dates, window)
+        rolling = _rolling_stats(series, dates)
+        result["anomalies_full"] = anomalies_full
+        result["anomalies"] = anomalies_full.get("rolling_zscore", [])
+        result["rolling_full"] = rolling
+        result["rolling"] = {
             "window": window,
             "mean": rolling["windows"].get(str(window), {}).get("mean", []),
             "std": rolling["windows"].get(str(window), {}).get("std", []),
-        },
-        "decomposition": decomp,
-        "acf": acf_pacf.get("acf"),
-        "pacf": acf_pacf.get("pacf"),
-        "anomalies": anomalies_full.get("rolling_zscore", []),  # legacy field
+        }
+        result["lag_analysis"] = _lag_analysis(series)
+        computed.append("anomalies")
 
-        # --- New enterprise fields ---
-        "data_quality": quality,
-        "descriptive_stats": stats,
-        "normality_tests": normality,
-        "stationarity": stationarity,
-        "differencing_suggestions": diff_suggestions,
-        "acf_pacf_full": acf_pacf,
-        "spectral": spectral,
-        "change_points": change_points,
-        "anomalies_full": anomalies_full,
-        "rolling_full": rolling,
-        "lag_analysis": lag_analysis,
-        "trend_tests": trend_tests,
-        "seasonality_tests": seasonality,
-        "granger_causality": granger,
-        "forecasting_readiness": readiness,
-    }
+    if "change_points" in methods_set:
+        result["change_points"] = _change_point_detection(series, dates)
+        computed.append("change_points")
+
+    if "granger" in methods_set:
+        other_numeric = [
+            c for c in df.columns
+            if c != value_col and c != time_col and pd.api.types.is_numeric_dtype(df[c])
+        ]
+        result["granger_causality"] = _granger_causality(df, value_col, other_numeric)
+        computed.append("granger")
+
+    if "readiness" in methods_set:
+        # Recomputes its (cheap) prerequisites rather than depending on the
+        # other groups having already run — decomposition is intentionally
+        # left out (it's the expensive one), so readiness loses only the
+        # optional ETS recommendation when requested standalone.
+        stationarity = _stationarity_tests(series)
+        trend_tests = _trend_tests(series)
+        seasonality = _seasonality_tests(series)
+        acf_pacf = _acf_pacf(series)
+        quality = _data_quality(df_ts, time_col, value_col)
+        readiness = _forecasting_readiness(stationarity, None, acf_pacf, quality, trend_tests, seasonality)
+        result["forecasting_readiness"] = readiness
+        result["has_trend"] = readiness["has_trend"]
+        computed.append("readiness")
+
+    result["computed_methods"] = computed
+    return result

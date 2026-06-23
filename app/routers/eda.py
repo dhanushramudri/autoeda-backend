@@ -343,16 +343,32 @@ def get_feature_importance_methods(
         ]
     }
 
-@router.get("/{dataset_id}/timeseries", response_model=TimeSeriesResult)
+@router.get("/{dataset_id}/timeseries", response_model=TimeSeriesResult, response_model_exclude_unset=True)
 def get_timeseries(
     dataset_id: int,
     time_col: str,
     value_col: str,
+    methods: str | None = None,  # comma-separated; default: "overview" for a fast first render
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    """
+    Lazy-loading time series analysis — mirrors /feature-importance's pattern.
+
+    Query params:
+    - methods: Optional comma-separated list of groups to compute.
+      Default (None): just 'overview' (chart + data quality + stats — fast).
+      Available: overview, stationarity, decomposition, acf_pacf, anomalies,
+      change_points, granger, readiness.
+    """
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "timeseries", "time_col": time_col, "value_col": value_col}
+
+    methods_list = [m.strip().lower() for m in methods.split(",")] if methods else ["overview"]
+
+    cache_key = {
+        "type": "timeseries", "time_col": time_col, "value_col": value_col,
+        "methods": sorted(methods_list),
+    }
     cached = get_cached_result(db, dataset_id, "timeseries", cache_key, ds.content_hash or "")
     if cached:
         return TimeSeriesResult(**cached)
@@ -360,7 +376,7 @@ def get_timeseries(
     try:
         df = _load_df(ds)
         from ..eda.timeseries import run_timeseries
-        result = _run_isolated(run_timeseries, df, time_col, value_col)
+        result = _run_isolated(run_timeseries, df, time_col, value_col, methods=methods_list)
         store_result(db, dataset_id, "timeseries", cache_key, result, ds.content_hash or "")
         return TimeSeriesResult(**result)
     except HTTPException:
