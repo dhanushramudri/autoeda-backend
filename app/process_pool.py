@@ -20,7 +20,7 @@ from threading import Lock
 logger = logging.getLogger("autoeda.process_pool")
 
 MAX_WORKERS = int(os.environ.get("EDA_POOL_WORKERS", max(1, os.cpu_count() or 1)))
-DEFAULT_TIMEOUT_SECONDS = 180
+DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("EDA_POOL_TIMEOUT_SECONDS", 600))
 
 _pool: ProcessPoolExecutor | None = None
 _lock = Lock()

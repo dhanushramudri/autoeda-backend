@@ -35,6 +35,12 @@ warnings.filterwarnings("ignore")
 
 MAX_POINTS = 2_000  # max points sent to frontend for rendering
 QUADRATIC_TEST_CAP = 5_000  # zivot-andrews / mann-kendall are O(n^2) — subsample above this
+# ruptures' "rbf" cost model precomputes an O(n^2) kernel (Gram) matrix before
+# PELT even starts — at n=5000 that was observed to both hit a 180s timeout
+# and OOM-crash the worker on a noisy/ID-like series (no real change-point
+# structure for PELT's pruning to exploit). Kept separate from
+# QUADRATIC_TEST_CAP since this one needs to be much smaller.
+CHANGE_POINT_SAMPLE_CAP = 1_500
 
 
 def _subsample_series(series: pd.Series, n: int = QUADRATIC_TEST_CAP) -> pd.Series:
@@ -506,17 +512,22 @@ def _change_point_detection(series: pd.Series, dates: list[str]) -> dict:
     if len(s) < 30 or len(dates) != len(series.dropna()):
         return result
 
-    s_sub, idx_map = _subsample_with_index(s)
+    s_sub, idx_map = _subsample_with_index(s, n=CHANGE_POINT_SAMPLE_CAP)
 
-    # Try ruptures (fast C backend)
+    # Try ruptures (fast C backend). model="l2" (mean-shift) is used instead
+    # of "rbf" — rbf precomputes an O(n^2) kernel matrix before PELT even
+    # starts, which both timed out and OOM-crashed the worker in production
+    # on a noisy/ID-like series; l2's cost function is O(1) per segment with
+    # no such precomputation, at the cost of only detecting mean shifts
+    # rather than general distributional changes.
     try:
         import ruptures as rpt
 
-        model = rpt.Pelt(model="rbf", min_size=max(2, len(s_sub) // 20)).fit(s_sub)
+        model = rpt.Pelt(model="l2", min_size=max(2, len(s_sub) // 20)).fit(s_sub)
         pen = np.var(s_sub) * np.log(len(s_sub))
         bkps = model.predict(pen=pen)
         cps = [int(idx_map[b - 1]) for b in bkps[:-1] if 0 <= b - 1 < len(idx_map)]
-        result["method"] = "PELT (rbf)"
+        result["method"] = "PELT (l2)"
         result["change_points"] = [
             {"index": i, "date": dates[i], "value": _safe(float(s[i]))} for i in cps[:20] if i < len(dates)
         ]
@@ -873,13 +884,6 @@ def _forecasting_readiness(
 
 
 # ---------------------------------------------------------------------------
-# Main entry point — split into independently-callable method groups so the
-# frontend can render the chart immediately and load the rest progressively
-# (mirrors feature_importance.py's `methods` lazy-loading pattern), instead of
-# one giant blocking call that — on a large series — used to tie up a
-# process-pool worker for minutes (decomposition's STL, change-point
-# detection's bootstrap, and Granger causality's repeated OLS fits are the
-# expensive ones; the rest are cheap even on ~150k rows).
 # ---------------------------------------------------------------------------
 
 ALL_TS_METHODS = [
@@ -970,8 +974,6 @@ def run_timeseries(df: pd.DataFrame, time_col: str, value_col: str, methods: lis
         computed.append("stationarity")
 
     if "decomposition" in methods_set:
-        # Cheap ACF-based period hint, recomputed locally rather than carried
-        # over from the "stationarity" group's response.
         seasonality_hint = _seasonality_tests(series)
         decomp = _decomposition(series, dates, seasonality_hint.get("dominant_period"))
         result["decomposition"] = decomp
@@ -1014,10 +1016,6 @@ def run_timeseries(df: pd.DataFrame, time_col: str, value_col: str, methods: lis
         computed.append("granger")
 
     if "readiness" in methods_set:
-        # Recomputes its (cheap) prerequisites rather than depending on the
-        # other groups having already run — decomposition is intentionally
-        # left out (it's the expensive one), so readiness loses only the
-        # optional ETS recommendation when requested standalone.
         stationarity = _stationarity_tests(series)
         trend_tests = _trend_tests(series)
         seasonality = _seasonality_tests(series)
