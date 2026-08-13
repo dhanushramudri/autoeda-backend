@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -23,11 +24,138 @@ logging.basicConfig(
 logger = logging.getLogger("autoeda")
 
 
+async def _auto_refresh_scheduler():
+    """Polls every 60s for datasets due for a scheduled refresh and re-runs the EDA pipeline."""
+    import json
+    import uuid
+    from datetime import datetime, timezone, timedelta
+
+    from .database import SessionLocal
+    from .models.dataset import Dataset
+    from .models.job import BackgroundJob
+    from .tasks import run_eda_pipeline
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                now = datetime.now(timezone.utc)
+                due = (
+                    db.query(Dataset)
+                    .filter(Dataset.refresh_interval_minutes.isnot(None))
+                    .filter(Dataset.status != "processing")
+                    .all()
+                )
+                for ds in due:
+                    last = ds.updated_at
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    if now < last + timedelta(minutes=ds.refresh_interval_minutes):
+                        continue
+
+                    ds.status = "processing"
+                    db.commit()
+
+                    job_id = str(uuid.uuid4())
+                    cfg = json.loads(ds.source_config or "{}")
+                    job = BackgroundJob(
+                        id=job_id, job_type="scheduled_refresh", status="pending", progress=0,
+                        message=f"Scheduled refresh: {ds.name}",
+                        dataset_id=ds.id, created_by=ds.created_by,
+                    )
+                    db.add(job)
+                    db.commit()
+
+                    asyncio.create_task(asyncio.to_thread(run_eda_pipeline, job_id, ds.id, ds.file_path, cfg))
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("Auto-refresh scheduler tick failed")
+        await asyncio.sleep(60)
+
+
+def _check_one_live_sync(dataset_id: int):
+    """Runs in a worker thread: cheap Delta version check, triggers reload only on an actual change."""
+    import json
+    import uuid
+
+    from .database import SessionLocal
+    from .models.dataset import Dataset
+    from .models.data_source import DataSource
+    from .models.job import BackgroundJob
+    from .connectors.db_connector import DBConnector
+    from .routers.sources import _build_connector_config
+    from .tasks import run_eda_pipeline
+
+    db = SessionLocal()
+    try:
+        ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if not ds or not ds.live_sync_enabled or ds.status == "processing":
+            return
+        source = db.query(DataSource).filter(DataSource.id == ds.source_id).first()
+        if not source:
+            return
+
+        catalog, schema, table = ds.source_table.split(".")
+        cfg = _build_connector_config(source)
+        version_info = DBConnector().get_databricks_table_version(cfg, catalog, schema, table)
+        current_version = version_info.get("version")
+
+        if current_version is None or current_version == ds.last_synced_version:
+            return  # no change since last check — skip the expensive reload
+
+        ds.last_synced_version = current_version
+        ds.status = "processing"
+        db.commit()
+
+        job_id = str(uuid.uuid4())
+        job = BackgroundJob(
+            id=job_id, job_type="live_sync", status="pending", progress=0,
+            message=f"Live sync: {ds.name} changed (Delta v{current_version}) — reloading",
+            dataset_id=ds.id, created_by=ds.created_by,
+        )
+        db.add(job)
+        db.commit()
+
+        cfg2 = json.loads(ds.source_config or "{}")
+        run_eda_pipeline(job_id, ds.id, ds.file_path, cfg2)
+    except Exception:
+        logger.exception(f"Live sync check failed for dataset {dataset_id}")
+    finally:
+        db.close()
+
+
+async def _live_sync_scheduler():
+    """Polls every 20s for live-sync datasets — cheap Delta version check, reload only on real change."""
+    from .database import SessionLocal
+    from .models.dataset import Dataset
+
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                dataset_ids = [
+                    d.id for d in db.query(Dataset.id).filter(Dataset.live_sync_enabled.is_(True)).all()
+                ]
+            finally:
+                db.close()
+
+            for dataset_id in dataset_ids:
+                asyncio.create_task(asyncio.to_thread(_check_one_live_sync, dataset_id))
+        except Exception:
+            logger.exception("Live-sync scheduler tick failed")
+        await asyncio.sleep(20)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     logger.info("AutoEDA backend started — DB initialised")
+    scheduler_task = asyncio.create_task(_auto_refresh_scheduler())
+    live_sync_task = asyncio.create_task(_live_sync_scheduler())
     yield
+    scheduler_task.cancel()
+    live_sync_task.cancel()
     shutdown_pool()
 
 

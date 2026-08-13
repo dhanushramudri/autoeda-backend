@@ -5,6 +5,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
@@ -286,6 +287,69 @@ def refresh_dataset(
     resp = DatasetCreateResponse.model_validate(ds)
     resp.job_id = job_id
     return resp
+
+
+class ScheduleRefreshRequest(BaseModel):
+    interval_minutes: Optional[int] = None
+
+
+@router.patch("/workspaces/{workspace_id}/datasets/{dataset_id}/schedule", response_model=DatasetResponse)
+def set_refresh_schedule(
+    workspace_id: int,
+    dataset_id: int,
+    body: ScheduleRefreshRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
+
+    if body.interval_minutes is not None and body.interval_minutes < 5:
+        raise HTTPException(status_code=400, detail="Minimum refresh interval is 5 minutes")
+
+    ds.refresh_interval_minutes = body.interval_minutes
+    if body.interval_minutes is not None:
+        ds.live_sync_enabled = False  # interval schedule and live sync are mutually exclusive
+    db.commit()
+    db.refresh(ds)
+    return ds
+
+
+class LiveSyncRequest(BaseModel):
+    enabled: bool
+
+
+@router.patch("/workspaces/{workspace_id}/datasets/{dataset_id}/live-sync", response_model=DatasetResponse)
+def set_live_sync(
+    workspace_id: int,
+    dataset_id: int,
+    body: LiveSyncRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
+
+    if body.enabled:
+        if ds.source_type != "databricks" or not ds.source_table or ds.source_table.count(".") != 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Live sync requires a dataset imported from a single Databricks table (catalog.schema.table). "
+                       "SQL-query imports can't be watched this way — use a fixed refresh interval instead.",
+            )
+        ds.live_sync_enabled = True
+        ds.refresh_interval_minutes = None  # mutually exclusive with interval schedule
+        ds.last_synced_version = None  # force a version check on next scheduler tick
+    else:
+        ds.live_sync_enabled = False
+
+    db.commit()
+    db.refresh(ds)
+    return ds
 
 
 @router.get("/workspaces/{workspace_id}/datasets/{dataset_id}/preview", response_model=DatasetPreview)
@@ -643,6 +707,12 @@ def transform_dataset(
                         s = s.str.replace(r"[^a-zA-Z0-9\s]", "", regex=True)
                     df[col] = s
 
+            elif op_type == "map_values":
+                col = op.get("column")
+                mapping = op.get("mapping") or {}
+                if col in df.columns and mapping:
+                    df[col] = df[col].replace(mapping)
+
         except Exception as e:
             errors_log.append({"op": op_type, "error": str(e)})
 
@@ -727,6 +797,9 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
     elif ds.source_type == "mongodb":
         config["db_type"] = "mongodb"
         return DBConnector().load_data(config, limit=limit)
+    elif ds.source_type == "databricks":
+        from ..databricks_loader import load_databricks_dataframe
+        return load_databricks_dataframe(ds, config, limit=limit)
     elif ds.source_type == "rest_api":
         return RESTAPIConnector().load_data(config, limit=limit)
     elif ds.source_type in ("s3", "azure", "gcs"):
@@ -734,5 +807,98 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
         return CloudConnector().load_data(config, limit=limit)
     else:
         raise ValueError(f"Unsupported source_type: {ds.source_type}")
+
+
+def _load_dataset_for_export(ds: Dataset) -> "pd.DataFrame":
+    import os, pandas as pd
+    if ds.file_path and os.path.exists(ds.file_path):
+        return pd.read_parquet(ds.file_path)
+    if ds.file_data:
+        from ..connectors.file_connector import load_from_bytes
+        filename = os.path.basename(ds.file_path or "") if ds.file_path else "data.parquet"
+        config = json.loads(ds.source_config or "{}")
+        return load_from_bytes(ds.file_data, filename, config)
+    raise HTTPException(status_code=400, detail="Dataset has no exportable data on disk")
+
+
+class ExportToDatabricksRequest(BaseModel):
+    model_config = {"populate_by_name": True}
+    source_id: int
+    catalog: str
+    schema_name: str = Field(alias="schema")
+    table: str
+    mode: str = "overwrite"
+
+
+def _run_databricks_export_bg(
+    job_id: str, df, cfg: dict,
+    catalog: str, schema_name: str, table: str, mode: str,
+):
+    from ..database import SessionLocal
+    import json
+    db = SessionLocal()
+    try:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job:
+            job.status = "running"; job.progress = 5
+            job.message = "Connecting to Databricks…"
+            db.commit()
+
+        from ..connectors.db_connector import DBConnector
+        result = DBConnector().write_to_databricks(cfg, df, catalog, schema_name, table, mode)
+
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job:
+            job.status = "completed"; job.progress = 100
+            job.message = f"Exported {result['rows_written']:,} rows → {result['fqtn']}"
+            job.result_data = json.dumps(result)
+            db.commit()
+    except Exception as exc:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if job:
+            job.status = "failed"; job.error = str(exc)
+            db.commit()
+    finally:
+        db.close()
+
+
+@router.post("/workspaces/{workspace_id}/datasets/{dataset_id}/export-to-databricks")
+def export_dataset_to_databricks(
+    workspace_id: int,
+    dataset_id: int,
+    body: ExportToDatabricksRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db)
+
+    from ..models.data_source import DataSource
+    from ..routers.sources import _build_connector_config
+
+    src = db.query(DataSource).filter(DataSource.id == body.source_id).first()
+    if not src or src.source_type != "databricks":
+        raise HTTPException(status_code=400, detail="Source not found or is not a Databricks source")
+
+    df = _load_dataset_for_export(ds)
+    cfg = _build_connector_config(src)
+
+    job_id = str(uuid.uuid4())
+    job = BackgroundJob(
+        id=job_id, job_type="databricks_export", status="pending", progress=0,
+        message=f"Queued: export {ds.name} → {body.catalog}.{body.schema_name}.{body.table}",
+        dataset_id=ds.id, created_by=current_user.id,
+    )
+    db.add(job)
+    db.commit()
+
+    background_tasks.add_task(
+        _run_databricks_export_bg, job_id, df, cfg,
+        body.catalog, body.schema_name, body.table, body.mode,
+    )
+    return {"job_id": job_id, "status": "pending"}
 
 

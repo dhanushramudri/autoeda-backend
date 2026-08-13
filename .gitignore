@@ -155,3 +155,4 @@ uploads/*
 downloads/
 logs/
 .vercel
+app/aws_ec2_script.txt

@@ -7,6 +7,7 @@ from .api_connector import RESTAPIConnector
 _DB_TYPES = {
     "postgresql", "mysql", "sqlite", "mssql", "redshift",
     "snowflake", "bigquery", "mongodb",
+    "databricks", "fabric",
 }
 
 _CLOUD_TYPES = {"s3", "azure_blob", "gcs", "google_drive"}
@@ -49,6 +50,9 @@ SOURCE_CATALOG = [
     {"id": "json",        "label": "JSON",          "group": "Files",         "icon": "file"},
     {"id": "parquet",     "label": "Parquet",       "group": "Files",         "icon": "file"},
     # ── APIs ───────────────────────────────────────────────────────────────
-    {"id": "rest_api",    "label": "REST API",      "group": "APIs",          "icon": "globe"},
-    {"id": "graphql",     "label": "GraphQL",       "group": "APIs",          "icon": "globe"},
+    {"id": "rest_api",    "label": "REST API",        "group": "APIs",      "icon": "globe"},
+    {"id": "graphql",     "label": "GraphQL",         "group": "APIs",      "icon": "globe"},
+    # ── Lakehouses ─────────────────────────────────────────────────────────
+    {"id": "databricks", "label": "Databricks",      "group": "Data Platforms", "icon": "lakehouse"},
+    {"id": "fabric",     "label": "Microsoft Fabric", "group": "Data Platforms", "icon": "lakehouse"},
 ]

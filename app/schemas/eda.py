@@ -42,6 +42,27 @@ class MissingResult(BaseModel):
     imputation_suggestions: dict[str, str]
 
 
+class SmartCleanExample(BaseModel):
+    before: str
+    after: str
+
+
+class SmartCleanSuggestion(BaseModel):
+    column: str
+    issue_type: str
+    severity: str
+    description: str
+    affected_count: int
+    affected_pct: float
+    operation: dict[str, Any]
+    examples: list[SmartCleanExample]
+
+
+class SmartCleanResult(BaseModel):
+    total_rows: int
+    suggestions: list[SmartCleanSuggestion]
+
+
 class DistributionResult(BaseModel):
     column: str
     is_numeric: bool

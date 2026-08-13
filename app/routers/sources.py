@@ -5,7 +5,7 @@ from typing import Any, Optional
 from decimal import Decimal
 
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import numpy as np
@@ -445,6 +445,7 @@ def import_as_dataset(
         source_type=src.source_type,
         source_id=src.id,
         source_table=body.table,
+        source_config=json.dumps({"table": body.table} if body.table else {}),
         is_materialized=True,
 
         file_path=file_path,
@@ -460,3 +461,365 @@ def import_as_dataset(
     db.commit()
     db.refresh(ds)
     return {"dataset_id": ds.id, "row_count": len(df), "column_count": len(df.columns)}
+
+
+# ── Databricks Unity Catalog browser ──────────────────────────────────────────
+
+def _assert_databricks(src: DataSource) -> None:
+    if src.source_type != "databricks":
+        raise HTTPException(status_code=400, detail="Source is not a Databricks source")
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/catalogs")
+def databricks_list_catalogs(
+    workspace_id: str,
+    source_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        catalogs = connector.list_databricks_catalogs(cfg)
+        return {"catalogs": catalogs}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/schemas")
+def databricks_list_schemas(
+    workspace_id: str,
+    source_id: int,
+    catalog: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        schemas = connector.list_databricks_schemas(cfg, catalog)
+        return {"schemas": schemas}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/tables")
+def databricks_list_tables(
+    workspace_id: str,
+    source_id: int,
+    catalog: str = Query(...),
+    schema: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        tables = connector.list_databricks_tables_in_schema(cfg, catalog, schema)
+        return {"tables": tables}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/stats")
+def databricks_table_stats(
+    workspace_id: str,
+    source_id: int,
+    catalog: str = Query(...),
+    schema: str = Query(...),
+    table: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        stats = connector.get_databricks_table_stats(cfg, catalog, schema, table)
+        return stats
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/history")
+def databricks_table_history(
+    workspace_id: str,
+    source_id: int,
+    catalog: str = Query(...),
+    schema: str = Query(...),
+    table: str = Query(...),
+    limit: int = Query(25),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        history = connector.list_databricks_table_history(cfg, catalog, schema, table, limit)
+        return {"history": history}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/compare-versions")
+def databricks_compare_versions(
+    workspace_id: str,
+    source_id: int,
+    catalog: str = Query(...),
+    schema: str = Query(...),
+    table: str = Query(...),
+    version_a: int = Query(...),
+    version_b: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        result = connector.compare_databricks_table_versions(cfg, catalog, schema, table, version_a, version_b)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class DatabricksQueryRequest(BaseModel):
+    sql: str
+    limit: int = 5000
+
+
+@router.post("/workspaces/{workspace_id}/sources/{source_id}/databricks/query")
+def databricks_run_query(
+    workspace_id: str,
+    source_id: int,
+    body: DatabricksQueryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    sql = body.sql.strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail="SQL query is required")
+    lower = sql.lower()
+    if any(lower.startswith(kw) for kw in ("drop ", "delete ", "truncate ", "alter ", "create ", "insert ", "update ", "merge ")):
+        raise HTTPException(status_code=400, detail="Only SELECT / WITH queries are allowed in the query editor")
+    try:
+        cfg = _build_connector_config(src)
+        from ..connectors.db_connector import DBConnector
+        conn_obj = DBConnector()
+        with conn_obj._databricks_connect(cfg) as conn:
+            with conn.cursor() as cursor:
+                # Apply limit if not already present
+                if "limit" not in lower:
+                    wrapped = f"SELECT * FROM ({sql}) AS _q LIMIT {body.limit}"
+                else:
+                    wrapped = sql
+                cursor.execute(wrapped)
+                cols = [d[0] for d in cursor.description]
+                rows = cursor.fetchall()
+        import math
+        def _clean(v):
+            if v is None:
+                return None
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            return v
+        return {
+            "columns": cols,
+            "rows": [[_clean(v) for v in row] for row in rows],
+            "row_count": len(rows),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class DatabricksQueryImportRequest(BaseModel):
+    sql: str
+    dataset_name: str
+    limit: int = 100000
+
+
+@router.post("/workspaces/{workspace_id}/sources/{source_id}/databricks/query-import")
+def databricks_import_query(
+    workspace_id: str,
+    source_id: int,
+    body: DatabricksQueryImportRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        cfg = _build_connector_config(src)
+        cfg["query"] = body.sql
+        cfg["table"] = None
+        from ..connectors.db_connector import DBConnector
+        df = DBConnector().load_data(cfg, limit=body.limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Query failed: {exc}")
+
+    import hashlib, os, pandas as pd
+    _clean_dataframe_for_json(df)
+    uploads_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    safe_name = "".join(c if c.isalnum() else "_" for c in body.dataset_name)
+    file_path = os.path.abspath(os.path.join(uploads_dir, f"{safe_name}_{src.id}_sql.parquet"))
+    df.to_parquet(file_path, index=False)
+    content = open(file_path, "rb").read()
+
+    from ..models.dataset import Dataset
+    try:
+        wid = int(workspace_id)
+    except (ValueError, TypeError):
+        wid = workspace_id  # type: ignore
+
+    ds = Dataset(
+        workspace_id=wid,
+        name=body.dataset_name,
+        description=f"SQL query from {src.name} (databricks)",
+        source_type=src.source_type,
+        source_id=src.id,
+        source_config=json.dumps({"query": body.sql}),
+        is_materialized=True,
+        file_path=file_path,
+        row_count=len(df),
+        column_count=len(df.columns),
+        file_size_bytes=os.path.getsize(file_path),
+        content_hash=hashlib.sha256(content).hexdigest(),
+        status="ready",
+        created_by=current_user.id,
+    )
+    db.add(ds)
+    db.commit()
+    db.refresh(ds)
+    return {"dataset_id": ds.id, "row_count": len(df), "column_count": len(df.columns)}
+
+
+# ── Databricks Jobs / Workflows (MLOps) ───────────────────────────────────────
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/jobs")
+def databricks_list_jobs(
+    workspace_id: str,
+    source_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        jobs = connector.list_databricks_jobs(cfg)
+        return {"jobs": jobs}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/jobs/{job_id}/runs")
+def databricks_job_runs(
+    workspace_id: str,
+    source_id: int,
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        runs = connector.list_databricks_job_runs(cfg, job_id)
+        return {"runs": runs}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class RunJobRequest(BaseModel):
+    notebook_params: Optional[dict[str, str]] = None
+
+
+@router.post("/workspaces/{workspace_id}/sources/{source_id}/databricks/jobs/{job_id}/run")
+def databricks_trigger_job(
+    workspace_id: str,
+    source_id: int,
+    job_id: int,
+    body: RunJobRequest = RunJobRequest(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        result = connector.run_databricks_job_now(cfg, job_id, notebook_params=body.notebook_params)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/workspaces/{workspace_id}/sources/{source_id}/databricks/runs/{run_id}/cancel")
+def databricks_cancel_run(
+    workspace_id: str,
+    source_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        return connector.cancel_databricks_run(cfg, run_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/jobs-active-runs")
+def databricks_active_runs(
+    workspace_id: str,
+    source_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        return {"active_runs": connector.list_databricks_active_runs(cfg)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/workspaces/{workspace_id}/sources/{source_id}/databricks/runs/{run_id}")
+def databricks_run_status(
+    workspace_id: str,
+    source_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    src = _source_or_404(source_id, workspace_id, db, current_user)
+    _assert_databricks(src)
+    try:
+        connector = get_connector(src.source_type)
+        cfg = _build_connector_config(src)
+        status_data = connector.get_databricks_run_status(cfg, run_id)
+        return status_data
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

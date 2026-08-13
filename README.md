@@ -2,52 +2,107 @@
 
 FastAPI backend for automated exploratory data analysis: dataset ingestion, statistical analysis, a tool-calling AI agent (Scout), and evidence-backed hypothesis testing.
 
-## Quick Start
+## Prerequisites
 
-### 1. Install
+- Python 3.11+
+- PostgreSQL (recommended for production) **or** SQLite (zero-setup, local dev only)
+- Redis (optional — used for result caching; app works without it)
+
+## Quick Start (Local)
+
+### 1. Create a virtual environment
 
 ```bash
-pip3 install -r requirements.txt
+cd autoeda-backend
+
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
 ```
 
-### 2. Configure Environment
-
-Create `.env` in the project root:
+### 2. Install dependencies
 
 ```bash
-SECRET_KEY=your-secret-key
-DATABASE_URL=postgresql://user:password@localhost:5432/autoeda
+pip install -r requirements.txt
+```
+
+### 3. Configure environment
+
+Copy the example and edit:
+
+```bash
+cp .env.example .env
+```
+
+Minimum `.env` for local development (SQLite — no database setup needed):
+
+```env
+SECRET_KEY=any-random-string-at-least-32-chars
+
+# SQLite — easiest for local dev
+DATABASE_URL=sqlite:///./app/storage/autoeda.db
+
 ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=admin-password
-ANTHROPIC_API_KEY=your-claude-key
+ADMIN_PASSWORD=Admin@123
+
+# At least one AI key is needed for Scout and Hypotheses features
+GEMINI_API_KEY=your-gemini-key
 ```
 
-### 3. Run Migrations
+> For PostgreSQL: `DATABASE_URL=postgresql+psycopg2://user:password@localhost:5432/autoeda`
+
+### 4. Run migrations
 
 ```bash
-python3 -m alembic upgrade head
+alembic upgrade head
 ```
 
-### 4. Start
+> On a fresh install, `alembic upgrade head` and the auto-create on startup both work. Use Alembic going forward for any schema changes.
+
+### 5. Start the server
 
 ```bash
-python3 run.py
+uvicorn app.main:app --reload --port 8000
 ```
 
-Server: [http://localhost:8000](http://localhost:8000) · API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
+- API: `http://localhost:8000`
+- Interactive docs: `http://localhost:8000/docs`
+- Health check: `http://localhost:8000/api/v1/health`
 
-Production runs via the included `Dockerfile` (`alembic upgrade head` then `uvicorn app.main:app`).
+The admin account from `.env` is seeded automatically on first start.
+
+---
 
 ## Environment Variables
 
-- `SECRET_KEY` — JWT signing key; also derives the key used to encrypt stored data source credentials
-- `DATABASE_URL` — PostgreSQL connection string
-- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — seeded admin account
-- `ALGORITHM` (default `HS256`), `ACCESS_TOKEN_EXPIRE_MINUTES` (default `480`)
-- `AUTO_PROVISION_EMAIL_DOMAIN` — emails on this domain get an account auto-created on first login
-- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` — at least one; checked in that priority order
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` / `S3_ATTACHMENTS_BUCKET` — large uploads (attachments, Scout images) go browser/client → S3 directly via presigned URLs, bypassing the frontend proxy's body-size limit
-- `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`, `SHAREPOINT_EXCEL_URL` — existing SharePoint integration
+| Variable | Required | Description |
+|---|---|---|
+| `SECRET_KEY` | Yes | JWT signing key (any random string, min 32 chars) |
+| `DATABASE_URL` | Yes | SQLite (`sqlite:///./app/storage/autoeda.db`) or PostgreSQL connection string |
+| `ADMIN_EMAIL` | Yes | Email for the auto-seeded admin account |
+| `ADMIN_PASSWORD` | Yes | Password for the admin account |
+| `GEMINI_API_KEY` | No* | Google Gemini — Scout AI & Hypotheses |
+| `OPENAI_API_KEY` | No* | OpenAI alternative for AI features |
+| `ANTHROPIC_API_KEY` | No* | Claude alternative for AI features |
+| `ADMIN_EMAILS` | No | Comma-separated additional admin emails |
+| `MICROSOFT_EMAILS` | No | Comma-separated emails for Microsoft mock login |
+| `AUTO_PROVISION_EMAIL_DOMAIN` | No | Emails on this domain get an account auto-created on first login (default: `jmangroup.com`) |
+| `GLOBAL_DATASET_EMAIL` | No | Datasets uploaded by this account are shared across all workspaces |
+| `AWS_ACCESS_KEY_ID` | No | S3 large file uploads (attachments) |
+| `AWS_SECRET_ACCESS_KEY` | No | S3 |
+| `AWS_REGION` | No | S3 region (default: `eu-north-1`) |
+| `S3_ATTACHMENTS_BUCKET` | No | S3 bucket name |
+| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | No | Azure AD / SharePoint integration |
+| `SHAREPOINT_EXCEL_URL` | No | SharePoint feedback table URL |
+| `EDA_POOL_TIMEOUT_SECONDS` | No | Timeout for heavy EDA computations (default: `600`) |
+
+> *At least one of `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` is required for Scout and Hypotheses. The app falls back through them in that priority order.
+
+---
 
 ## What's in here
 
@@ -61,28 +116,31 @@ Production runs via the included `Dockerfile` (`alembic upgrade head` then `uvic
 
 **Heavy computation isolation**: CPU/memory-heavy analysis runs in a separate process pool so one crash or OOM can't take down the API server.
 
+---
+
 ## Architecture
 
 **External services:**
-- **AWS RDS (PostgreSQL)** — primary database (SQLAlchemy + Alembic migrations).
-- **AWS S3** — presigned-URL uploads/downloads for large files (attachments, Scout images), bypassing the frontend proxy's body-size limit.
-- **Claude / OpenAI / Gemini** — LLM providers behind one interface; whichever key is set first (in that priority order) is the active provider for Scout and Hypotheses.
-- **Azure AD / SharePoint** — service-principal auth for the existing SharePoint integration.
-- **Vercel (frontend)** — the Next.js frontend calls this API through its own proxy route, not directly.
+- **PostgreSQL** — primary database (SQLAlchemy + Alembic migrations).
+- **AWS S3** — presigned-URL uploads/downloads for large files, bypassing the frontend proxy's body-size limit.
+- **Claude / OpenAI / Gemini** — LLM providers behind one interface; whichever key is set first (in that priority order) is the active provider.
+- **Azure AD / SharePoint** — service-principal auth for the SharePoint integration.
 
-**In-process, not separate services** (no message broker or external cache is actually in the loop)
-- **DuckDB** — the SQL engine behind Warehouse, Join Builder, and the SQL Editor; runs in-process against loaded dataframes, no external server.
+**In-process (no external services needed):**
+- **DuckDB** — SQL engine behind Warehouse and SQL Editor; runs in-process against loaded DataFrames.
 - **A bounded process pool** — isolates CPU/memory-heavy EDA computation from the main API process.
-- **A thread pool + an in-memory event bus** — background jobs and real-time notifications; both reset on restart, neither is backed by Redis or a queue.
+- **A thread pool + in-memory event bus** — background jobs and real-time notifications.
 
 **Deployment**: Docker container on EC2, built from the included `Dockerfile`.
+
+---
 
 ## Project Structure
 
 ```
 app/
   routers/        One file per resource (datasets, scout, hypotheses, sources, warehouse, sql_editor, ...)
-  models/         SQLAlchemy models
+  models/         SQLAlchemy ORM models
   schemas/        Pydantic request/response schemas
   eda/            Statistical analysis implementations
   ai/
@@ -94,9 +152,19 @@ app/
 alembic/          DB migrations
 ```
 
+## Supported Data Sources
+
+- **Files**: CSV, Excel (.xlsx/.xls), JSON, Parquet, TSV
+- **Databases**: PostgreSQL, MySQL, SQLite, MSSQL, MongoDB
+- **Cloud**: AWS S3, Azure Blob Storage, Google Cloud Storage
+- **API**: REST endpoints
+
+---
+
 ## Tech Stack
 
 - Python 3.11+, FastAPI, SQLAlchemy, Alembic, PostgreSQL
 - pandas, numpy, scipy, scikit-learn, shap, statsmodels, ruptures
-- boto3, azure-storage-blob, google-cloud-storage/bigquery, snowflake-connector-python, databricks-sql-connector
+- boto3, azure-storage-blob, google-cloud-storage
 - anthropic, openai, google-genai
+

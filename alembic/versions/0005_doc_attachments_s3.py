@@ -1,7 +1,7 @@
 """add s3_key to doc_attachments, make file_data nullable
 
-Revision ID: 0004
-Revises: 0003
+Revision ID: 0005
+Revises: 0004
 Create Date: 2026-06-19 00:00:00.000000
 
 """
@@ -10,8 +10,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0004"
-down_revision: Union[str, None] = "0003"
+revision: str = "0005"
+down_revision: Union[str, None] = "0004"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

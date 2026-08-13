@@ -15,7 +15,7 @@ from app.database import Base  # noqa: F401
 from app.models import (  # noqa: F401
     user, workspace, dataset, job,
     pipeline_step, column_metadata, data_quality_rule,
-    eda_run, saved_chart, named_segment, data_source,
+    eda_run, saved_chart, named_segment, data_source, dataset_doc,feedback, hypothesis, scout,
 )
 
 config = context.config

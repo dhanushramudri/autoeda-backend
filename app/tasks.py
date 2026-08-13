@@ -57,6 +57,23 @@ def _load_dataframe(dataset_id: int, file_path: str | None, config: dict):
             from .connectors.db_connector import DBConnector
             cfg["db_type"] = "mongodb"
             return DBConnector().load_data(cfg)
+        elif src == "databricks":
+            from .models.data_source import DataSource
+            from .routers.sources import _build_connector_config
+            from .connectors.db_connector import DBConnector
+            if not ds.source_id:
+                raise ValueError(f"Dataset {dataset_id} has no linked Databricks source")
+            source = db.query(DataSource).filter(DataSource.id == ds.source_id).first()
+            if not source:
+                raise ValueError(f"Linked Databricks source for dataset {dataset_id} not found")
+            dcfg = _build_connector_config(source)
+            if cfg.get("query"):
+                dcfg["query"] = cfg["query"]
+                dcfg["table"] = None
+            elif cfg.get("table") or ds.source_table:
+                dcfg["table"] = cfg.get("table") or ds.source_table
+                dcfg["query"] = None
+            return DBConnector().load_data(dcfg)
         elif src == "rest_api":
             from .connectors.api_connector import RESTAPIConnector
             return RESTAPIConnector().load_data(cfg)

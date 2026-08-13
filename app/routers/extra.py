@@ -73,6 +73,9 @@ def _load_df(ds: Dataset) -> pd.DataFrame:
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql", "mongodb"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config)
+    elif ds.source_type == "databricks":
+        from ..databricks_loader import load_databricks_dataframe
+        return load_databricks_dataframe(ds, config)
     elif ds.source_type == "rest_api":
         return RESTAPIConnector().load_data(config)
     elif ds.source_type in ("s3", "azure", "gcs"):

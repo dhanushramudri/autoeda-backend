@@ -53,6 +53,9 @@ def _load_dataset_df(dataset_id: str, db: Session, user: User = None):
     elif ds.source_type == "mongodb":
         config["db_type"] = "mongodb"
         return DBConnector().load_data(config)
+    elif ds.source_type == "databricks":
+        from ..databricks_loader import load_databricks_dataframe
+        return load_databricks_dataframe(ds, config)
     elif ds.source_type == "rest_api":
         return RESTAPIConnector().load_data(config)
     elif ds.source_type in ("s3", "azure", "gcs"):

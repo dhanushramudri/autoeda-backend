@@ -1,7 +1,8 @@
 import json
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_active_user
@@ -19,11 +20,18 @@ from ..schemas.eda import (
     OutlierResult,
     ProfileResult,
     QualityScore,
+    SmartCleanResult,
     TextResult,
     TimeSeriesResult,
 )
 
 router = APIRouter(prefix="/datasets", tags=["eda"])
+
+# Shared bounds for the "row_limit" query param exposed on every analysis endpoint —
+# lets the UI choose how many rows to pull from connector-backed sources (Databricks,
+# SQL DBs, APIs, cloud storage) instead of the previous hardcoded 50K cap.
+ROW_LIMIT_MIN = 1_000
+ROW_LIMIT_MAX = 2_000_000
 
 
 def _run_isolated(fn, *args, **kwargs):
@@ -49,7 +57,9 @@ def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) ->
     return ds
 
 
-def _load_df(ds: Dataset):
+def _load_df(ds: Dataset, row_limit: Optional[int] = None):
+    """row_limit only affects connector-backed sources (Databricks, SQL DBs, APIs,
+    cloud storage) — file datasets always load what was actually uploaded."""
     import os
     import pandas as pd
     from ..connectors.file_connector import FileConnector, load_from_bytes
@@ -71,17 +81,37 @@ def _load_df(ds: Dataset):
             raise FileNotFoundError(f"No file data available for dataset {ds.id}")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
-        return DBConnector().load_data(config)
+        return DBConnector().load_data(config, limit=row_limit)
     elif ds.source_type == "mongodb":
         config["db_type"] = "mongodb"
-        return DBConnector().load_data(config)
+        return DBConnector().load_data(config, limit=row_limit)
+    elif ds.source_type == "databricks":
+        from ..databricks_loader import load_databricks_dataframe
+        return load_databricks_dataframe(ds, config, limit=row_limit)
     elif ds.source_type == "rest_api":
-        return RESTAPIConnector().load_data(config)
+        return RESTAPIConnector().load_data(config, limit=row_limit)
     elif ds.source_type in ("s3", "azure", "gcs"):
         config["cloud_type"] = ds.source_type
-        return CloudConnector().load_data(config)
+        return CloudConnector().load_data(config, limit=row_limit)
     else:
         raise ValueError(f"Unsupported source_type: {ds.source_type}")
+
+
+def _try_databricks_profile_pushdown(ds: Dataset) -> Optional[dict]:
+    """Full-table profile via Spark SQL aggregates — no row limit. Returns None on
+    any failure so the caller can fall back to the sampled pandas path."""
+    if ds.source_type != "databricks":
+        return None
+    try:
+        import json as _json
+        from ..databricks_loader import get_databricks_pushdown_context
+        from ..connectors.db_connector import DBConnector
+
+        config = _json.loads(ds.source_config or "{}")
+        cfg, source_sql = get_databricks_pushdown_context(ds, config)
+        return DBConnector().compute_databricks_profile_full(cfg, source_sql)
+    except Exception:
+        return None
 
 
 @router.get("/{dataset_id}/profile", response_model=ProfileResult)
@@ -97,6 +127,11 @@ def get_profile(
         return ProfileResult(**cached)
 
     try:
+        pushdown_result = _try_databricks_profile_pushdown(ds)
+        if pushdown_result is not None:
+            store_result(db, dataset_id, "profile", cache_key, pushdown_result, ds.content_hash or "")
+            return ProfileResult(**pushdown_result)
+
         df = _load_df(ds)
         from ..eda.profiler import run_profile
         result = _run_isolated(run_profile, df)
@@ -113,6 +148,39 @@ def get_profile(
 
 
 
+def _missing_result_from_profile(profile: dict) -> dict:
+    """Derive the Missing Values view from an already-computed full-table profile —
+    avoids a second Databricks round-trip. Co-occurrence correlation and MCAR
+    detection need row-level data so they're left empty in pushdown mode."""
+    total_rows = profile["total_rows"]
+    total_columns = profile["total_columns"]
+    cols_with_missing = [
+        {"name": c["name"], "count": c["missing_count"], "pct": c["missing_pct"]}
+        for c in profile["columns"] if c["missing_count"] > 0
+    ]
+    total_missing = sum(c["count"] for c in cols_with_missing)
+    total_cells = total_rows * max(total_columns, 1)
+
+    suggestions: dict[str, str] = {}
+    for c in profile["columns"]:
+        if c["missing_count"] == 0:
+            continue
+        if c["semantic_type"] == "numeric":
+            skew = c.get("skewness")
+            suggestions[c["name"]] = "median (skewed)" if (skew is not None and abs(skew) > 1) else "mean (symmetric)"
+        else:
+            suggestions[c["name"]] = "mode (categorical)"
+
+    return {
+        "columns": cols_with_missing,
+        "total_missing": total_missing,
+        "missing_pct": round(total_missing / max(total_cells, 1) * 100, 2),
+        "correlation_matrix": {},
+        "mcar_indicators": {},
+        "imputation_suggestions": suggestions,
+    }
+
+
 @router.get("/{dataset_id}/missing", response_model=MissingResult)
 def get_missing(
     dataset_id: int,
@@ -126,6 +194,12 @@ def get_missing(
         return MissingResult(**cached)
 
     try:
+        pushdown_profile = _try_databricks_profile_pushdown(ds)
+        if pushdown_profile is not None:
+            result = _missing_result_from_profile(pushdown_profile)
+            store_result(db, dataset_id, "missing", cache_key, result, ds.content_hash or "")
+            return MissingResult(**result)
+
         df = _load_df(ds)
         from ..eda.missing import run_missing_analysis
         result = _run_isolated(run_missing_analysis, df)
@@ -137,21 +211,50 @@ def get_missing(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/{dataset_id}/smart-clean", response_model=SmartCleanResult)
+def get_smart_clean(
+    dataset_id: int,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Auto-detect cleanable issues (inconsistent casing, whitespace, mixed date
+    formats) and return one-click-applyable Transform Studio operations for each."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "smart_clean", "row_limit": row_limit}
+    cached = get_cached_result(db, dataset_id, "smart_clean", cache_key, ds.content_hash or "")
+    if cached:
+        return SmartCleanResult(**cached)
+
+    try:
+        df = _load_df(ds, row_limit)
+        from ..eda.smart_clean import detect_smart_clean_issues
+        suggestions = _run_isolated(detect_smart_clean_issues, df)
+        result = {"total_rows": len(df), "suggestions": suggestions}
+        store_result(db, dataset_id, "smart_clean", cache_key, result, ds.content_hash or "")
+        return SmartCleanResult(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{dataset_id}/distributions", response_model=DistributionResult)
 def get_distributions(
     dataset_id: int,
     column: str,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "distributions", "column": column}
+    cache_key = {"type": "distributions", "column": column, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "distributions", cache_key, ds.content_hash or "")
     if cached:
         return DistributionResult(**cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.distributions import run_distribution
         result = _run_isolated(run_distribution, df, column)
         store_result(db, dataset_id, "distributions", cache_key, result, ds.content_hash or "")
@@ -166,7 +269,8 @@ def get_distributions(
 def get_correlations(
     dataset_id: int,
     method: str = "pearson",
-    methods: str | None = None,  # comma-separated; default: "numeric" for a fast first render
+    methods: str | None = None,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -182,13 +286,13 @@ def get_correlations(
 
     methods_list = [m.strip().lower() for m in methods.split(",")] if methods else ["numeric"]
 
-    cache_key = {"type": "correlations", "method": method, "methods": sorted(methods_list), "v": 3}
+    cache_key = {"type": "correlations", "method": method, "methods": sorted(methods_list), "row_limit": row_limit, "v": 3}
     cached = get_cached_result(db, dataset_id, "correlations", cache_key, ds.content_hash or "")
     if cached:
         return CorrelationResult.model_validate(cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.correlations import run_correlations
         result = _run_isolated(run_correlations, df, method, methods=methods_list)
         store_result(db, dataset_id, "correlations", cache_key, result, ds.content_hash or "")
@@ -204,17 +308,18 @@ def get_outliers(
     dataset_id: int,
     method: str = "iqr",
     column: Optional[str] = None,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "outliers", "method": method, "column": column}
+    cache_key = {"type": "outliers", "method": method, "column": column, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "outliers", cache_key, ds.content_hash or "")
     if cached:
         return OutlierResult(**cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.outliers import run_outlier_detection
         result = _run_isolated(run_outlier_detection, df, method, column)
         store_result(db, dataset_id, "outliers", cache_key, result, ds.content_hash or "")
@@ -232,12 +337,13 @@ def get_feature_importance(
     dataset_id: int,
     target: str,
     methods: str | None = None,  # NEW: comma-separated list of methods to compute
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """
     Get feature importance with lazy loading support.
-    
+
     Query params:
     - target: Column name to analyze
     - methods: Optional comma-separated list of methods to compute.
@@ -246,28 +352,29 @@ def get_feature_importance(
       Example: ?target=price&methods=rf,mi,correlation,permutation
     """
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    
+
     if methods:
         methods_list = [m.strip().lower() for m in methods.split(",")]
     else:
         methods_list = ["rf", "metadata"]
-    
+
     cache_key = {
         "type": "feature_importance",
         "target": target,
         "methods": sorted(methods_list),  # Normalize order for cache consistency
+        "row_limit": row_limit,
     }
-    
+
     cached = get_cached_result(
         db, dataset_id, "feature_importance",
         cache_key, ds.content_hash or ""
     )
-    
+
     if cached:
         return FeatureImportanceResult(**cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.feature_importance import run_feature_importance
 
         result = _run_isolated(run_feature_importance, df, target, methods=methods_list, timeout=240)
@@ -361,6 +468,7 @@ def get_timeseries(
     time_col: str,
     value_col: str,
     methods: str | None = None,  # comma-separated; default: "overview" for a fast first render
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -379,14 +487,14 @@ def get_timeseries(
 
     cache_key = {
         "type": "timeseries", "time_col": time_col, "value_col": value_col,
-        "methods": sorted(methods_list),
+        "methods": sorted(methods_list), "row_limit": row_limit,
     }
     cached = get_cached_result(db, dataset_id, "timeseries", cache_key, ds.content_hash or "")
     if cached:
         return TimeSeriesResult(**cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.timeseries import run_timeseries
         result = _run_isolated(run_timeseries, df, time_col, value_col, methods=methods_list)
         store_result(db, dataset_id, "timeseries", cache_key, result, ds.content_hash or "")
@@ -401,17 +509,18 @@ def get_timeseries(
 def get_text_analysis(
     dataset_id: int,
     column: str,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "text", "column": column}
+    cache_key = {"type": "text", "column": column, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "text", cache_key, ds.content_hash or "")
     if cached:
         return TextResult(**cached)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.text_analysis import run_text_analysis
         result = _run_isolated(run_text_analysis, df, column)
         store_result(db, dataset_id, "text", cache_key, result, ds.content_hash or "")
@@ -425,13 +534,14 @@ def get_text_analysis(
 @router.get("/{dataset_id}/quality-score", response_model=QualityScore)
 def get_quality_score(
     dataset_id: int,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     ds = _get_authorized_dataset(dataset_id, current_user, db)
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.quality_score import run_quality_score
         result = _run_isolated(run_quality_score, df)
         return QualityScore(**result)
@@ -445,12 +555,13 @@ def get_quality_score(
 def get_analysis(
     dataset_id: int,
     force_refresh: bool = False,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Full EDA analysis — all chart data in one call. Cached per dataset version."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "analysis"}
+    cache_key = {"type": "analysis", "row_limit": row_limit}
 
     if force_refresh:
         from ..models.dataset import EDAResult
@@ -471,7 +582,7 @@ def get_analysis(
         return cached
 
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.analysis import run_full_analysis
         result = _run_isolated(run_full_analysis, df, timeout=240)
         store_result(db, dataset_id, "analysis", cache_key, result, ds.content_hash or "")
@@ -486,13 +597,14 @@ def get_analysis(
 def get_analysis_column(
     dataset_id: int,
     col_name: str,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Chart data for a single column (lazy-loading support)."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.analysis import (
             _histogram_kde, _box_stats, _violin_kde, _qq_plot, _ecdf,
             _normality_test, _bar_chart, _pie_data, _pareto_data,
@@ -543,6 +655,7 @@ def get_bivariate(
     col1: str,
     col2: str,
     btype: str = "num_num",
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
@@ -550,12 +663,12 @@ def get_bivariate(
     if btype not in ("num_num", "cat_cat", "num_cat"):
         raise HTTPException(status_code=400, detail="btype must be num_num, cat_cat, or num_cat")
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "bivariate", "col1": col1, "col2": col2, "btype": btype}
+    cache_key = {"type": "bivariate", "col1": col1, "col2": col2, "btype": btype, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "bivariate", cache_key, ds.content_hash or "")
     if cached:
         return cached
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.analysis import (
             compute_bivariate_num_num, compute_bivariate_cat_cat, compute_bivariate_num_cat
         )
@@ -577,17 +690,18 @@ def get_bivariate(
 def get_pca(
     dataset_id: int,
     n_components: int = 2,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """PCA on all numeric columns."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "pca", "n_components": n_components}
+    cache_key = {"type": "pca", "n_components": n_components, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "pca", cache_key, ds.content_hash or "")
     if cached:
         return cached
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.analysis import compute_pca
         from ..eda.profiler import classify_column
         num_cols = [c for c in df.columns if classify_column(df[c]) == "numeric"]
@@ -606,17 +720,18 @@ def get_scatter3d(
     x: str,
     y: str,
     z: str,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """3D scatter for three numeric columns."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
-    cache_key = {"type": "scatter3d", "x": x, "y": y, "z": z}
+    cache_key = {"type": "scatter3d", "x": x, "y": y, "z": z, "row_limit": row_limit}
     cached = get_cached_result(db, dataset_id, "scatter3d", cache_key, ds.content_hash or "")
     if cached:
         return cached
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         from ..eda.analysis import compute_scatter3d
         result = _run_isolated(compute_scatter3d, df, x, y, z)
         store_result(db, dataset_id, "scatter3d", cache_key, result, ds.content_hash or "")
@@ -631,13 +746,14 @@ def get_scatter3d(
 def transform_preview(
     dataset_id: int,
     operations: dict,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Preview transformations without saving."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         
         # Apply transformations in memory
         ops_list = operations.get("operations", [])
@@ -685,13 +801,14 @@ def transform_preview(
 def transform_apply(
     dataset_id: int,
     operations: dict,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     """Apply transformations and save as a new dataset."""
     ds = _get_authorized_dataset(dataset_id, current_user, db)
     try:
-        df = _load_df(ds)
+        df = _load_df(ds, row_limit)
         
         # Apply transformations
         ops_list = operations.get("operations", [])
@@ -755,9 +872,11 @@ def transform_apply(
         db.add(new_dataset)
         db.commit()
         db.refresh(new_dataset)
-        
+
         return new_dataset
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+

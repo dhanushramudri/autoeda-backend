@@ -24,6 +24,11 @@ class DatasetResponse(BaseModel):
     content_hash: Optional[str] = None
     status: str
     error_message: Optional[str] = None
+    refresh_interval_minutes: Optional[int] = None
+    live_sync_enabled: bool = False
+    last_synced_version: Optional[str] = None
+    source_id: Optional[int] = None
+    source_table: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

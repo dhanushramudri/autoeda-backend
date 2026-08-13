@@ -147,6 +147,9 @@ def _load_dataset_df(dataset_id: Union[str, int], db: Session, workspace_id: int
         elif src == "mongodb":
             config["db_type"] = "mongodb"
             return DBConnector().load_data(config)
+        elif src == "databricks":
+            from ..databricks_loader import load_databricks_dataframe
+            return load_databricks_dataframe(ds, config)
         elif src == "rest_api":
             return RESTAPIConnector().load_data(config)
         elif src in ("s3", "azure", "gcs"):

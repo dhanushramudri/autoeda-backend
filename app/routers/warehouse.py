@@ -56,19 +56,39 @@ def _load_duckdb():
 
 
 def _register_dataset(con, view_name: str, ds: Dataset):
-    """Register a dataset as a DuckDB view — always loads from DB bytes, never disk."""
+    """Register a dataset as a DuckDB view — dispatches by source_type like the other loaders."""
     import os
-    from ..connectors.file_connector import load_from_bytes
     import json
+    from ..connectors.file_connector import load_from_bytes, FileConnector
+    from ..connectors.db_connector import DBConnector
+    from ..connectors.api_connector import RESTAPIConnector
+    from ..connectors.cloud_connector import CloudConnector
 
     config = json.loads(ds.source_config or "{}")
-    
-    if not ds.file_data:
-        raise ValueError(f"Dataset '{ds.name}' has no file data in database")
-    
-    filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-    # Use database bytes only (file-based data stored in DB)
-    df = load_from_bytes(ds.file_data, filename, config)
+
+    if ds.source_type == "file":
+        if ds.file_path and os.path.exists(ds.file_path):
+            config["file_path"] = ds.file_path
+            df = FileConnector().load_data(config)
+        elif ds.file_data:
+            filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+            df = load_from_bytes(ds.file_data, filename, config)
+        else:
+            raise ValueError(f"Dataset '{ds.name}' has no file data in database")
+    elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql", "mongodb"):
+        config["db_type"] = ds.source_type
+        df = DBConnector().load_data(config)
+    elif ds.source_type == "databricks":
+        from ..databricks_loader import load_databricks_dataframe
+        df = load_databricks_dataframe(ds, config)
+    elif ds.source_type == "rest_api":
+        df = RESTAPIConnector().load_data(config)
+    elif ds.source_type in ("s3", "azure", "gcs"):
+        config["cloud_type"] = ds.source_type
+        df = CloudConnector().load_data(config)
+    else:
+        raise ValueError(f"Unsupported source_type: {ds.source_type}")
+
     con.register(view_name, df)
 
 

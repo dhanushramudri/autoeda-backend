@@ -49,6 +49,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     _migrate_feedback_attachments()
     _migrate_feedback_comment_parent()
+    _migrate_dataset_refresh_column()
     _seed_admin()
     _seed_test_user()
     _seed_microsoft_emails()
@@ -97,6 +98,31 @@ def _migrate_feedback_comment_parent():
     if "parent_id" not in existing:
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE feedback_comments ADD COLUMN parent_id INTEGER REFERENCES feedback_comments(id) ON DELETE CASCADE"))
+            conn.commit()
+
+
+def _migrate_dataset_refresh_column():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("datasets")}
+    except Exception:
+        return
+
+    if "refresh_interval_minutes" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE datasets ADD COLUMN refresh_interval_minutes INTEGER"))
+            conn.commit()
+
+    if "live_sync_enabled" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE datasets ADD COLUMN live_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.commit()
+
+    if "last_synced_version" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE datasets ADD COLUMN last_synced_version VARCHAR(64)"))
             conn.commit()
 
 
