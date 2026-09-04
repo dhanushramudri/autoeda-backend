@@ -18,6 +18,10 @@ Security model — be clear-eyed about what this is and isn't:
 import builtins
 import contextlib
 import io
+import json as _json
+import math as _math
+import re as _re
+from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
@@ -85,6 +89,11 @@ def exec_sandboxed(df: pd.DataFrame, code: str) -> dict:
     sandbox_globals = {
         "__builtins__": _ALLOWED_BUILTINS,
         "pd": pd, "np": np, "stats": stats, "df": df,
+        # Common safe stdlib utilities pre-loaded so the model doesn't reach
+        # for `import re`/`import math`/etc. and hit the blanket import block —
+        # each retry from that costs a full extra tool-call round-trip.
+        "re": _re, "math": _math, "json": _json,
+        "Counter": Counter, "defaultdict": defaultdict,
     }
     stdout_buf = io.StringIO()
     try:

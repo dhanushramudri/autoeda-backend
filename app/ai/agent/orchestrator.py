@@ -24,6 +24,11 @@ from .tools import TOOL_SPECS, execute_tool
 
 logger = logging.getLogger("autoeda.ai.agent")
 
+# 128,000 is the hard completion-token ceiling for the configured deployment
+# (gpt-5.5-class reasoning model) — used for the final answer / tool-planning
+# calls so a thorough investigation never gets truncated mid-response.
+MAX_COMPLETION_TOKENS = 128_000
+
 _MAX_ITERATIONS_AGENT = 10
 # 2, not 1: chat mode should allow a single tool lookup *and* a chance to
 # answer using it — capping at 1 means even one tool call burns the only
@@ -132,7 +137,7 @@ def _run_tool_loop(
     tool_trace: list[dict[str, Any]],
     tool_specs: list[dict[str, Any]] | None = None,
     temperature: float = 0.2,
-    max_tokens: int = 1536,
+    max_tokens: int = MAX_COMPLETION_TOKENS,
 ) -> Iterator[dict[str, Any]]:
     """Mutates `messages`/`tool_trace` in place; yields progress events.
     `tool_specs`/`temperature`/`max_tokens` default to Scout's own settings;
@@ -208,7 +213,7 @@ def run_agent_turn(
 
     # Iteration cap hit without a natural stop — ask once more for a final answer.
     try:
-        final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+        final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=MAX_COMPLETION_TOKENS)
     except QuotaExceededError:
         return {"answer": _QUOTA_MSG, "tool_trace": tool_trace}
     answer = (final["content"] if final else None) or _RAN_OUT_MSG
@@ -263,7 +268,7 @@ def run_agent_turn_stream(
 
     full_answer = ""
     try:
-        for chunk in provider.stream_text(messages, temperature=0.2, max_tokens=1536):
+        for chunk in provider.stream_text(messages, temperature=0.2, max_tokens=MAX_COMPLETION_TOKENS):
             full_answer += chunk
             yield {"type": "answer_chunk", "text": chunk}
     except QuotaExceededError:
@@ -278,7 +283,7 @@ def run_agent_turn_stream(
         # more forced call only if the iteration cap was hit with no answer yet.
         if ready_content is None:
             try:
-                final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=1536)
+                final = provider.generate_with_tools(messages, [], temperature=0.2, max_tokens=MAX_COMPLETION_TOKENS)
             except QuotaExceededError:
                 yield {"type": "error", "code": "quota_exceeded", "message": _QUOTA_MSG}
                 return

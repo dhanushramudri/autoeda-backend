@@ -35,6 +35,8 @@ class Hypothesis(Base):
     severity: Mapped[str | None] = mapped_column(String(10), nullable=True)  # info | warning | danger
     columns_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_trace_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    image_content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

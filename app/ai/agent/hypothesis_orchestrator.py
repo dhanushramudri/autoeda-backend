@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from ..llm import get_provider
 from ..providers.base import QuotaExceededError
 from ...models.user import User
-from .orchestrator import _run_tool_loop, _NO_PROVIDER_MSG, _QUOTA_MSG
+from .orchestrator import _run_tool_loop, _resolve_image, _NO_PROVIDER_MSG, _QUOTA_MSG
 from .tools import TOOL_SPECS
 
 logger = logging.getLogger("autoeda.ai.agent.hypothesis")
@@ -41,8 +41,13 @@ _READONLY_TOOL_SPECS = [t for t in TOOL_SPECS if t["name"] not in _MUTATING_TOOL
 
 _MAX_ITERATIONS_VALIDATE = 6
 _MAX_ITERATIONS_GENERATE = 14
-_GENERATE_MAX_TOKENS = 2560
-_VALIDATE_MAX_TOKENS = 1536
+# 128,000 is the hard ceiling for the configured deployment (gpt-5.5-class
+# reasoning model) — set to the max so a long investigation or a large
+# hypothesis batch never gets cut off mid-JSON, which used to force an
+# extra _force_final_json retry call (a truncation-caused parse failure
+# was itself a hidden source of the "why so many steps" slowness).
+_GENERATE_MAX_TOKENS = 128_000
+_VALIDATE_MAX_TOKENS = 128_000
 _TEMPERATURE = 0.15  # lower than Scout chat's 0.2 — verification should be conservative
 
 _INCONCLUSIVE_CAP_HIT = "Could not reach a verdict within the investigation budget — try narrowing the hypothesis to one specific, testable claim."
@@ -119,10 +124,16 @@ def _generate_system_prompt(workspace_id: int, dataset_id: int | None, count: in
     )
 
 
-def _build_messages(system_prompt: str, user_message: str) -> list[dict[str, Any]]:
+def _build_messages(
+    system_prompt: str, user_message: str, image: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    user_msg: dict[str, Any] = {"role": "user", "content": user_message}
+    resolved_image = _resolve_image(image)
+    if resolved_image:
+        user_msg["image"] = resolved_image
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
+        user_msg,
     ]
 
 
@@ -157,13 +168,16 @@ def _force_final_json(provider, messages: list[dict[str, Any]], max_tokens: int)
 
 def run_hypothesis_validation(
     *, statement: str, workspace_id: int, dataset_id: int | None, db: Session, user: User,
+    image: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Returns {"status", "verdict", "evidence_summary", "confidence", "columns", "tool_trace"}."""
+    """Returns {"status", "verdict", "evidence_summary", "confidence", "columns", "tool_trace"}.
+    `image`, if given, is {"key": str, "media_type": str} — an S3 reference to
+    whatever the hypothesis was created with (e.g. a chart screenshot)."""
     provider = get_provider()
     if provider is None:
         return {"status": "error", "verdict": _NO_PROVIDER_MSG, "evidence_summary": None, "confidence": None, "columns": [], "tool_trace": []}
 
-    messages = _build_messages(_validate_system_prompt(workspace_id, dataset_id), statement)
+    messages = _build_messages(_validate_system_prompt(workspace_id, dataset_id), statement, image=image)
     tool_trace: list[dict[str, Any]] = []
     final_content: str | None = None
 
@@ -200,15 +214,17 @@ def run_hypothesis_validation(
 
 def run_hypothesis_validation_stream(
     *, statement: str, workspace_id: int, dataset_id: int | None, db: Session, user: User,
+    image: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Streaming variant. Yields tool_call/tool_result events live, then a
-    single terminal {"type": "result", "hypothesis": {...}} or {"type": "error", ...}."""
+    single terminal {"type": "result", "hypothesis": {...}} or {"type": "error", ...}.
+    `image`, if given, is {"key": str, "media_type": str} — see run_hypothesis_validation."""
     provider = get_provider()
     if provider is None:
         yield {"type": "error", "message": _NO_PROVIDER_MSG}
         return
 
-    messages = _build_messages(_validate_system_prompt(workspace_id, dataset_id), statement)
+    messages = _build_messages(_validate_system_prompt(workspace_id, dataset_id), statement, image=image)
     tool_trace: list[dict[str, Any]] = []
     final_content: str | None = None
 

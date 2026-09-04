@@ -5,6 +5,8 @@ from pydantic import BaseModel
 class HypothesisCreate(BaseModel):
     statement: str
     dataset_id: int | None = None
+    image_key: str | None = None
+    image_content_type: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -27,6 +29,7 @@ class HypothesisOut(BaseModel):
     severity: str | None
     columns: list[str] = []
     tool_trace: list[dict] = []
+    image_url: str | None = None
     created_at: datetime
     updated_at: datetime
     validated_at: datetime | None

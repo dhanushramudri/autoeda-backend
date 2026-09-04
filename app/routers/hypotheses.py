@@ -8,14 +8,20 @@ from ..ai.agent.hypothesis_orchestrator import (
     run_hypothesis_generation, run_hypothesis_generation_stream,
     run_hypothesis_validation, run_hypothesis_validation_stream,
 )
+from ..ai.llm import provider_name
 from ..auth import get_current_active_user
 from ..database import get_db
 from ..models.hypothesis import Hypothesis
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
+from ..s3_attachments import presign_get_inline
 from ..schemas.hypotheses import GenerateRequest, HypothesisCreate, HypothesisOut
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/hypotheses", tags=["hypotheses"])
+
+# Same providers that can actually see an attached image — see routers/scout.py.
+_IMAGE_CAPABLE_PROVIDERS = {"claude", "openai"}
+_IMAGE_ATTACH_ERROR = "Image attachments require Claude or OpenAI to be the active provider."
 
 
 def _assert_member(workspace_id: int, user: User, db: Session):
@@ -47,6 +53,7 @@ def _serialize(h: Hypothesis) -> HypothesisOut:
         confidence=h.confidence, severity=h.severity,
         columns=json.loads(h.columns_json) if h.columns_json else [],
         tool_trace=json.loads(h.tool_trace_json) if h.tool_trace_json else [],
+        image_url=presign_get_inline(h.image_key) if h.image_key else None,
         created_at=h.created_at, updated_at=h.updated_at, validated_at=h.validated_at,
     )
 
@@ -79,10 +86,13 @@ def create_hypothesis(
     _assert_member(workspace_id, current_user, db)
     if not payload.statement.strip():
         raise HTTPException(status_code=400, detail="statement cannot be empty")
+    if payload.image_key and provider_name() not in _IMAGE_CAPABLE_PROVIDERS:
+        raise HTTPException(status_code=400, detail=_IMAGE_ATTACH_ERROR)
     h = Hypothesis(
         workspace_id=workspace_id, dataset_id=payload.dataset_id,
         created_by=current_user.id, origin="user",
         statement=payload.statement.strip(), status="pending",
+        image_key=payload.image_key, image_content_type=payload.image_content_type,
     )
     db.add(h)
     db.commit()
@@ -195,8 +205,10 @@ def validate_hypothesis(
     db.add(h)
     db.commit()
 
+    image = {"key": h.image_key, "media_type": h.image_content_type} if h.image_key else None
     result = run_hypothesis_validation(
         statement=h.statement, workspace_id=workspace_id, dataset_id=h.dataset_id, db=db, user=current_user,
+        image=image,
     )
     h = _apply_validation(h, result, db)
     return _serialize(h)
@@ -215,12 +227,14 @@ def validate_hypothesis_stream(
     db.add(h)
     db.commit()
     statement, dataset_id = h.statement, h.dataset_id
+    image = {"key": h.image_key, "media_type": h.image_content_type} if h.image_key else None
 
     def event_stream():
         outcome: dict | None = None
         error_message: str | None = None
         for event in run_hypothesis_validation_stream(
             statement=statement, workspace_id=workspace_id, dataset_id=dataset_id, db=db, user=current_user,
+            image=image,
         ):
             if event["type"] == "result":
                 outcome = {**event["hypothesis"], "tool_trace": event["tool_trace"]}

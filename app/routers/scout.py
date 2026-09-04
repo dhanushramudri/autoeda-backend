@@ -24,7 +24,8 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/scout", tags=["scout"])
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _IMAGE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-_IMAGE_ATTACH_ERROR = "Image attachments require the Claude provider to be active."
+_IMAGE_CAPABLE_PROVIDERS = {"claude", "openai"}
+_IMAGE_ATTACH_ERROR = "Image attachments require Claude or OpenAI to be the active provider."
 
 
 def _assert_member(workspace_id: int, user: User, db: Session):
@@ -169,7 +170,7 @@ def post_message(
         raise HTTPException(status_code=400, detail="mode must be 'agent' or 'chat'")
     if not payload.message.strip() and not payload.image_key:
         raise HTTPException(status_code=400, detail="message cannot be empty")
-    if payload.image_key and provider_name() != "claude":
+    if payload.image_key and provider_name() not in _IMAGE_CAPABLE_PROVIDERS:
         raise HTTPException(status_code=400, detail=_IMAGE_ATTACH_ERROR)
 
     history_rows = (
@@ -234,7 +235,7 @@ def post_message_stream(
         raise HTTPException(status_code=400, detail="mode must be 'agent' or 'chat'")
     if not payload.message.strip() and not payload.image_key:
         raise HTTPException(status_code=400, detail="message cannot be empty")
-    if payload.image_key and provider_name() != "claude":
+    if payload.image_key and provider_name() not in _IMAGE_CAPABLE_PROVIDERS:
         raise HTTPException(status_code=400, detail=_IMAGE_ATTACH_ERROR)
 
     history_rows = (

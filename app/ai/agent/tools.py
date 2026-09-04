@@ -304,7 +304,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "run_python",
-        "description": "Execute Python (pandas as pd, numpy as np, scipy.stats as stats; dataset preloaded as `df`) for analysis the other tools don't cover — custom aggregations, multi-step calculations, ad-hoc logic. Assign your final answer to a variable named `result` (a number, string, list, dict, or small DataFrame/Series). Runs in a restricted, isolated sandbox: no file/network/import access, ~20s time limit. Prefer the dedicated tools when one already covers the question — use this for genuine gaps.",
+        "description": "Execute Python (pandas as pd, numpy as np, scipy.stats as stats, re, math, json, Counter, defaultdict — all preloaded; dataset preloaded as `df`) for analysis the other tools don't cover — custom aggregations, multi-step calculations, ad-hoc logic. Assign your final answer to a variable named `result` (a number, string, list, dict, or small DataFrame/Series). Runs in a restricted, isolated sandbox: no `import` statements at all (everything you need is already preloaded above), no file/network access, ~20s time limit. Prefer the dedicated tools when one already covers the question — use this for genuine gaps.",
         "parameters": {
             "type": "object",
             "properties": {

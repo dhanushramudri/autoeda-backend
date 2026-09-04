@@ -1,17 +1,22 @@
 """
 LLM router — selects provider based on available API keys.
 
-Priority: ANTHROPIC_API_KEY → OPENAI_API_KEY → GEMINI_API_KEY → None
-(Claude is the intended production provider; Gemini is the local-dev
-fallback while no paid key is configured.)
+Priority: OPENAI_API_KEY / Azure OpenAI → ANTHROPIC_API_KEY → GEMINI_API_KEY → None
+(OpenAI — Azure-hosted in production — is the primary provider; Claude is
+a secondary fallback; Gemini is the last-resort fallback while no paid
+key is configured.)
 
 Adding a new provider later:
   1. Create app/ai/providers/<name>.py implementing LLMProvider
   2. Add it to _build_provider() below
   3. Set the corresponding env var
+
+Note: keys must be read via `settings` (pydantic-settings), not raw
+os.environ — nothing in this app calls load_dotenv(), so values that
+only live in .env never reach os.environ directly. Only declared
+Settings fields actually pick up .env values.
 """
 import logging
-import os
 from typing import Optional
 
 from .providers.base import LLMProvider
@@ -23,30 +28,30 @@ _provider_checked = False
 
 
 def _build_provider() -> Optional[LLMProvider]:
-    # Read from pydantic settings first (covers .env via pydantic-settings),
-    # then fall back to raw os.environ for keys not declared in Settings.
     from ..config import settings
 
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    gemini_key = settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
+    openai_key = settings.OPENAI_API_KEY
+    azure_key = settings.AZURE_OPENAI_API_KEY or settings.TENALI_AI_API
+    azure_configured = bool(azure_key and settings.AZURE_OPENAI_ENDPOINT and settings.AZURE_OPENAI_DEPLOYMENT)
+    anthropic_key = settings.ANTHROPIC_API_KEY
+    gemini_key = settings.GEMINI_API_KEY
+
+    if openai_key or azure_configured:
+        from .providers.openai_provider import OpenAIProvider
+        logger.info("AI provider: %s", "Azure OpenAI" if azure_configured else "OpenAI")
+        return OpenAIProvider()
 
     if anthropic_key:
         from .providers.claude import ClaudeProvider
         logger.info("AI provider: Claude")
         return ClaudeProvider()
 
-    if openai_key:
-        from .providers.openai_provider import OpenAIProvider
-        logger.info("AI provider: OpenAI")
-        return OpenAIProvider()
-
     if gemini_key:
         from .providers.gemini import GeminiProvider
         logger.info("AI provider: Gemini")
         return GeminiProvider()
 
-    logger.warning("No AI provider configured — set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
+    logger.warning("No AI provider configured — set AZURE_OPENAI_* (or OPENAI_API_KEY), ANTHROPIC_API_KEY, or GEMINI_API_KEY")
     return None
 
 

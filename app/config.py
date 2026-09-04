@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     GLOBAL_DATASET_EMAIL: str = ""
 
     GEMINI_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = ""
+
+    # Azure OpenAI — the primary AI provider. AZURE_OPENAI_API_KEY is the
+    # conventional name; TENALI_AI_API is an alternate name this key has
+    # also been provisioned under — both are accepted.
+    AZURE_OPENAI_API_KEY: str = ""
+    TENALI_AI_API: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_API_VERSION: str = "2024-10-21"
+    AZURE_OPENAI_DEPLOYMENT: str = ""
 
     AZURE_TENANT_ID: str = ""
     AZURE_CLIENT_ID: str = ""
