@@ -11,6 +11,11 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
+    # Hard guardrail on how many items an Auto EDA run may plan in total —
+    # deliberately conservative by default (local dev/testing); raise via
+    # env var in production once cost/duration at scale is understood.
+    AUTO_EDA_MAX_ITEMS: int = 15
+
     ADMIN_EMAIL: str
     ADMIN_PASSWORD: str
 

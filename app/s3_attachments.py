@@ -15,14 +15,21 @@ PRESIGN_EXPIRES_IN = 3600
 
 
 def _client():
-    return boto3.client(
-        "s3",
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION,
-        endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com",
-        config=BotoConfig(signature_version="s3v4"),
-    )
+    # Only pass explicit static keys when they're actually configured —
+    # passing empty strings would make boto3 try to auth with literal blank
+    # credentials instead of falling back to its default chain. Omitting
+    # them lets boto3 pick up the EC2 instance role automatically (see
+    # infra/terraform/iam.tf), so a deployed box needs no AWS_ACCESS_KEY_ID/
+    # SECRET in .env at all — only local/non-EC2 setups need real keys here.
+    kwargs = {
+        "region_name": settings.AWS_REGION,
+        "endpoint_url": f"https://s3.{settings.AWS_REGION}.amazonaws.com",
+        "config": BotoConfig(signature_version="s3v4"),
+    }
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+        kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+    return boto3.client("s3", **kwargs)
 
 
 def new_object_key(article_id: int, filename: str) -> str:
