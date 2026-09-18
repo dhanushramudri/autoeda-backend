@@ -40,14 +40,15 @@ _MUTATING_TOOLS = {"add_quality_rule", "save_chart", "create_segment", "remember
 _READONLY_TOOL_SPECS = [t for t in TOOL_SPECS if t["name"] not in _MUTATING_TOOLS]
 
 _MAX_ITERATIONS_VALIDATE = 6
-# 14 was sized for validating/generating hypotheses about a single dataset.
-# Auto EDA's "hypothesis_investigation" step (auto_eda_orchestrator.py) uses
-# this same generation mode workspace-wide across every dataset in a run —
-# list_datasets + profiling + statistical tests across 5 datasets with dozens
-# of columns each can genuinely need more than 14 tool calls, and running out
+# History: 14 -> 25 -> 40. Sized for validating/generating hypotheses about a
+# single dataset originally; Auto EDA's "hypothesis_investigation" step
+# (auto_eda_orchestrator.py) uses this same generation mode workspace-wide
+# across every dataset in a run — list_datasets + profiling + statistical
+# tests across 5 datasets with dozens of columns each can genuinely need
+# more tool calls than a single-dataset investigation, and running out
 # mid-investigation surfaces as "Could not reach a verdict" with zero
-# hypotheses produced, not a partial result.
-_MAX_ITERATIONS_GENERATE = 25
+# hypotheses produced, not a partial result. Raise again if this recurs.
+_MAX_ITERATIONS_GENERATE = 40
 # NOT 128,000 (that's the deployment's OUTPUT ceiling, not its total context
 # window — see orchestrator.py's MAX_COMPLETION_TOKENS, which uses the same
 # value for Scout's own short-lived chat turns). A multi-turn tool-calling
@@ -142,6 +143,10 @@ def _generate_system_prompt(
         "quality score, distributions) before committing to your final list, so the "
         f"{count} you report are the most interesting, evidence-backed findings, not just "
         "the first things you noticed. " + _SCOPE_RULES + "\n\n"
+        "Investigate efficiently — prefer broad tools (profile, get_correlations, "
+        "feature importance) over many narrow single-column queries, and finalize "
+        "your JSON answer as soon as you have enough evidence rather than "
+        "continuing to explore.\n\n"
         "When you're done investigating, respond with ONLY a JSON array (no markdown "
         "fences, no text outside the JSON), each item shaped:\n"
         '{"title": "<short headline>", "statement": "<the hypothesis as a claim>", '
