@@ -269,7 +269,7 @@ def delete_article(
 # Vercel proxy in front of this backend caps bodies at ~4.5MB, which a 100MB
 # dataset attachment would blow straight through.
 
-MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024  # 100MB
+MAX_ATTACHMENT_BYTES = 1024 * 1024 * 1024  # 1GB
 
 
 @router.post("/doc-articles/{article_id}/attachments/presign", response_model=AttachmentPresignResponse, status_code=201)
@@ -283,7 +283,7 @@ def presign_attachment_upload(
     if not a:
         raise HTTPException(status_code=404, detail="Article not found")
     if body.file_size_bytes > MAX_ATTACHMENT_BYTES:
-        raise HTTPException(status_code=413, detail="Attachment exceeds 100MB limit")
+        raise HTTPException(status_code=413, detail="Attachment exceeds 1GB limit")
     if body.file_size_bytes <= 0:
         raise HTTPException(status_code=400, detail="Empty file")
 

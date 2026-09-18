@@ -11,7 +11,8 @@ from botocore.client import Config as BotoConfig
 
 from .config import settings
 
-PRESIGN_EXPIRES_IN = 3600
+PRESIGN_EXPIRES_IN_UPLOAD = 4 * 3600    # 4 hours
+PRESIGN_EXPIRES_IN_DOWNLOAD = 3600
 
 
 def _client():
@@ -52,7 +53,7 @@ def presign_put(key: str, content_type: str | None) -> str:
             "Key": key,
             "ContentType": content_type or "application/octet-stream",
         },
-        ExpiresIn=PRESIGN_EXPIRES_IN,
+        ExpiresIn=PRESIGN_EXPIRES_IN_UPLOAD,
     )
 
 
@@ -64,7 +65,7 @@ def presign_get(key: str, filename: str) -> str:
             "Key": key,
             "ResponseContentDisposition": f'attachment; filename="{filename}"',
         },
-        ExpiresIn=PRESIGN_EXPIRES_IN,
+        ExpiresIn=PRESIGN_EXPIRES_IN_DOWNLOAD,
     )
 
 
@@ -74,7 +75,7 @@ def presign_get_inline(key: str) -> str:
     return _client().generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.S3_ATTACHMENTS_BUCKET, "Key": key},
-        ExpiresIn=PRESIGN_EXPIRES_IN,
+        ExpiresIn=PRESIGN_EXPIRES_IN_DOWNLOAD,
     )
 
 
