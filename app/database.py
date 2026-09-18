@@ -51,6 +51,7 @@ def init_db():
     _migrate_feedback_comment_parent()
     _migrate_dataset_refresh_column()
     _seed_admin()
+    _seed_playbook_categories()
     _seed_test_user()
     _seed_microsoft_emails()
     _promote_jman_admins()
@@ -180,6 +181,41 @@ def _seed_admin():
 
         member = WorkspaceMember(workspace_id=ws.id, user_id=admin.id, role="admin")
         db.add(member)
+        db.commit()
+    finally:
+        db.close()
+
+
+_DEFAULT_PLAYBOOK_CATEGORIES = [
+    ("Churn", "Identify at-risk customers early and design retention interventions that protect revenue and reduce leakage."),
+    ("Pricing", "Re-pricing, discounting, and monetization strategies to defend or grow margin."),
+    ("Forecasting", "Revenue, demand, and cash-flow forecasting models to support planning, budgeting, and diligence."),
+    ("Revenue Growth", "Cross-sell, upsell, and lead-scoring playbooks that drive top-line growth."),
+    ("Efficiency & Cost", "Automation and productivity playbooks that improve EBITDA and operating efficiency."),
+]
+
+
+def _seed_playbook_categories():
+    """Every fresh install otherwise starts with an empty Delivery Playbooks
+    page — seed the standard DS/AI delivery categories (matching JMAN's own
+    value-creation framework: revenue growth/protection + efficiency, plus
+    churn/pricing/forecasting as the concrete recurring engagement types) so
+    there's always a baseline to browse and add to. Idempotent — name is
+    unique, so re-running on every startup only inserts what's missing
+    (e.g. a category a user later renamed or deleted stays gone)."""
+    from .models.user import User
+    from .models.dataset_doc import DocCategory
+
+    db = SessionLocal()
+    try:
+        admin = db.query(User).filter(User.email == settings.ADMIN_EMAIL).first()
+        if not admin:
+            return
+        existing_names = {n for (n,) in db.query(DocCategory.name).all()}
+        for name, description in _DEFAULT_PLAYBOOK_CATEGORIES:
+            if name in existing_names:
+                continue
+            db.add(DocCategory(name=name, description=description, created_by=admin.id))
         db.commit()
     finally:
         db.close()
