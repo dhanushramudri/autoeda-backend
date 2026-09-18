@@ -12,6 +12,8 @@ services:
       - "8000:8000"
     volumes:
       - backend_storage:/app/app/storage
+    mem_limit: 2g
+    memswap_limit: 3g
     logging:
       driver: json-file
       options:

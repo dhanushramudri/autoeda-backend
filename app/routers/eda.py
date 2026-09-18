@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import defer as sa_defer
 
 from ..auth import get_current_active_user
 from ..cache import get_cached_result, store_result
@@ -50,7 +51,19 @@ def _run_isolated(fn, *args, **kwargs):
 
 
 def _get_authorized_dataset(dataset_id: int, current_user: User, db: Session) -> Dataset:
-    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    # file_data is the entire raw uploaded file stored as a LargeBinary
+    # column — a plain query eagerly loads it into memory even when it's
+    # never read (the common case: _load_df's fast path reads from
+    # ds.file_path on local disk and never touches ds.file_data at all).
+    # Deferring is transparent: if _load_df's fallback branch DOES need it,
+    # SQLAlchemy lazy-loads it on first access, same result either way —
+    # this only avoids paying for it upfront when it's not needed. Same
+    # pattern already used deliberately in routers/warehouse.py. This
+    # dataset+the row's DataFrame can both stay alive for a long-running
+    # Auto EDA run's entire duration (see auto_eda_orchestrator.py's
+    # `loaded` dict), so avoiding a redundant multi-megabyte blob per
+    # dataset matters more here than it looks like a one-line change.
+    ds = db.query(Dataset).options(sa_defer(Dataset.file_data)).filter(Dataset.id == dataset_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
     assert_dataset_access(ds, current_user, db)
