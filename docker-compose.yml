@@ -12,6 +12,11 @@ services:
       - "8000:8000"
     volumes:
       - backend_storage:/app/app/storage
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   backend_storage:
