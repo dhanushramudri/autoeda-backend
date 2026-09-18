@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from ..database import Base
 
@@ -41,3 +41,9 @@ class Hypothesis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set by /stop while a background validation is in flight — since the
+    # actual tool-calling loop is a blocking call with no cooperative
+    # cancellation point, this doesn't kill it instantly, but it does make
+    # the eventual _apply_validation call a no-op instead of clobbering the
+    # "stopped" state the user already sees (see routers/hypotheses.py).
+    stop_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

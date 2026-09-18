@@ -1,6 +1,7 @@
 import json
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,7 @@ from ..s3_attachments import presign_get_inline
 from ..schemas.hypotheses import GenerateRequest, HypothesisCreate, HypothesisOut
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/hypotheses", tags=["hypotheses"])
+logger = logging.getLogger("autoeda.routers.hypotheses")
 
 # Same providers that can actually see an attached image — see routers/scout.py.
 _IMAGE_CAPABLE_PROVIDERS = {"claude", "openai"}
@@ -133,21 +135,43 @@ def _persist_generated(workspace_id: int, dataset_id: int | None, items: list[di
     return rows
 
 
-@router.post("/generate", response_model=list[HypothesisOut])
+def _run_generate_bg(workspace_id: int, dataset_id: int | None, count: int, user_id: int):
+    """Runs generation to completion independent of any HTTP connection — the
+    old /generate/stream endpoint died the moment the browser navigated away
+    (Starlette cancels a StreamingResponse's generator on client disconnect);
+    a plain background task has no such tie to the request lifecycle, same
+    convention as Auto EDA's _run_in_background."""
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None:
+            return
+        result = run_hypothesis_generation(
+            workspace_id=workspace_id, dataset_id=dataset_id, count=count, db=db, user=user,
+        )
+        if result.get("error"):
+            logger.warning("hypothesis generation failed: %s", result["error"])
+            return
+        _persist_generated(workspace_id, dataset_id, result["hypotheses"], result["tool_trace"], db)
+    except Exception:
+        logger.exception("hypothesis generation background task crashed")
+    finally:
+        db.close()
+
+
+@router.post("/generate")
 def generate_hypotheses(
     workspace_id: int,
     payload: GenerateRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     _assert_member(workspace_id, current_user, db)
-    result = run_hypothesis_generation(
-        workspace_id=workspace_id, dataset_id=payload.dataset_id, count=payload.count, db=db, user=current_user,
-    )
-    if result.get("error"):
-        raise HTTPException(status_code=502, detail=result["error"])
-    rows = _persist_generated(workspace_id, payload.dataset_id, result["hypotheses"], result["tool_trace"], db)
-    return [_serialize(h) for h in rows]
+    background_tasks.add_task(_run_generate_bg, workspace_id, payload.dataset_id, payload.count, current_user.id)
+    return {"message": "Generating — new hypotheses will appear in the list as they're found."}
 
 
 @router.post("/generate/stream")
@@ -192,25 +216,80 @@ def _apply_validation(h: Hypothesis, result: dict, db: Session) -> Hypothesis:
     return h
 
 
+def _run_validate_bg(workspace_id: int, hypothesis_id: int, statement: str, dataset_id: int | None, image: dict | None, user_id: int):
+    """Same rationale as _run_generate_bg — the investigation now survives
+    navigating away, since it's a background task with no dependency on the
+    request/response still being open."""
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        h = db.query(Hypothesis).filter(Hypothesis.id == hypothesis_id).first()
+        if user is None or h is None:
+            return
+        result = run_hypothesis_validation(
+            statement=statement, workspace_id=workspace_id, dataset_id=dataset_id, db=db, user=user, image=image,
+        )
+        db.refresh(h)
+        if h.stop_requested:
+            # /stop already resolved this hypothesis's visible state —
+            # don't clobber it once the (uncancellable) investigation
+            # eventually finishes on its own.
+            return
+        _apply_validation(h, result, db)
+    except Exception:
+        logger.exception("hypothesis validation background task crashed")
+    finally:
+        db.close()
+
+
 @router.post("/{hypothesis_id}/validate", response_model=HypothesisOut)
 def validate_hypothesis(
     workspace_id: int,
     hypothesis_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
     _assert_member(workspace_id, current_user, db)
     h = _get_hypothesis(workspace_id, hypothesis_id, db)
     h.status = "validating"
+    h.stop_requested = False
     db.add(h)
     db.commit()
+    db.refresh(h)
 
     image = {"key": h.image_key, "media_type": h.image_content_type} if h.image_key else None
-    result = run_hypothesis_validation(
-        statement=h.statement, workspace_id=workspace_id, dataset_id=h.dataset_id, db=db, user=current_user,
-        image=image,
+    background_tasks.add_task(
+        _run_validate_bg, workspace_id, hypothesis_id, h.statement, h.dataset_id, image, current_user.id,
     )
-    h = _apply_validation(h, result, db)
+    return _serialize(h)
+
+
+@router.post("/{hypothesis_id}/stop", response_model=HypothesisOut)
+def stop_validation(
+    workspace_id: int,
+    hypothesis_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Best-effort stop: the investigation itself is a blocking tool-calling
+    loop with no cooperative cancellation point (same underlying loop Scout
+    chat uses), so this can't kill it mid-call the instant it's clicked —
+    but it resolves the hypothesis's visible state immediately, and
+    _run_validate_bg checks stop_requested before applying its eventual
+    result so a late-arriving verdict can't overwrite this."""
+    _assert_member(workspace_id, current_user, db)
+    h = _get_hypothesis(workspace_id, hypothesis_id, db)
+    if h.status != "validating":
+        raise HTTPException(status_code=400, detail="This hypothesis isn't being validated right now")
+    h.stop_requested = True
+    h.status = "inconclusive"
+    h.verdict = "Stopped by user before the investigation finished."
+    db.add(h)
+    db.commit()
+    db.refresh(h)
     return _serialize(h)
 
 
