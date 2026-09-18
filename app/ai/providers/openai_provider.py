@@ -44,13 +44,28 @@ def _is_unsupported_temperature(exc: Exception) -> bool:
     return "temperature" in msg and ("unsupported_value" in msg or "does not support" in msg)
 
 
+# Every caller in this codebase passes a non-default temperature (0.15-0.3),
+# and the active gpt-5.x deployment rejects ALL of them — so without this
+# cache, EVERY single call pays a full failed request (400) before the retry
+# below recovers it, silently doubling the latency of every LLM call in the
+# product. Once we've learned the deployment doesn't support it, remember
+# that for the rest of this process's life and skip sending it — recovery
+# still works even if this guess is ever wrong for a different deployment
+# (the except branch below still exists for that).
+_temperature_unsupported = False
+
+
 def _create(client, **kwargs):
     """chat.completions.create(), with one retry that drops `temperature`
     if the model rejects a non-default value outright."""
+    global _temperature_unsupported
+    if _temperature_unsupported:
+        kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
     try:
         return client.chat.completions.create(**kwargs)
     except Exception as e:
         if "temperature" in kwargs and _is_unsupported_temperature(e):
+            _temperature_unsupported = True
             kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
             return client.chat.completions.create(**kwargs)
         raise

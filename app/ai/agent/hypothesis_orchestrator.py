@@ -40,14 +40,30 @@ _MUTATING_TOOLS = {"add_quality_rule", "save_chart", "create_segment", "remember
 _READONLY_TOOL_SPECS = [t for t in TOOL_SPECS if t["name"] not in _MUTATING_TOOLS]
 
 _MAX_ITERATIONS_VALIDATE = 6
-_MAX_ITERATIONS_GENERATE = 14
-# 128,000 is the hard ceiling for the configured deployment (gpt-5.5-class
-# reasoning model) — set to the max so a long investigation or a large
-# hypothesis batch never gets cut off mid-JSON, which used to force an
-# extra _force_final_json retry call (a truncation-caused parse failure
-# was itself a hidden source of the "why so many steps" slowness).
-_GENERATE_MAX_TOKENS = 128_000
-_VALIDATE_MAX_TOKENS = 128_000
+# 14 was sized for validating/generating hypotheses about a single dataset.
+# Auto EDA's "hypothesis_investigation" step (auto_eda_orchestrator.py) uses
+# this same generation mode workspace-wide across every dataset in a run —
+# list_datasets + profiling + statistical tests across 5 datasets with dozens
+# of columns each can genuinely need more than 14 tool calls, and running out
+# mid-investigation surfaces as "Could not reach a verdict" with zero
+# hypotheses produced, not a partial result.
+_MAX_ITERATIONS_GENERATE = 25
+# NOT 128,000 (that's the deployment's OUTPUT ceiling, not its total context
+# window — see orchestrator.py's MAX_COMPLETION_TOKENS, which uses the same
+# value for Scout's own short-lived chat turns). A multi-turn tool-calling
+# investigation keeps every prior tool result in the conversation, so by a
+# later iteration the accumulated INPUT can be large — requesting a fixed
+# max_tokens=128,000 on every call regardless of how much input already
+# exists risks the combined (input + requested output) exceeding the real
+# context window, which the provider rejects outright as a 400 rather than
+# truncating. Observed in production: a hypothesis-generation run against a
+# multi-dataset workspace hit repeated 400s mid-investigation and burned its
+# entire iteration budget without ever reaching a final answer. The actual
+# output needed here — a JSON verdict or a handful of hypothesis objects —
+# is genuinely small; a big budget was never needed for the OUTPUT, only
+# for hidden reasoning tokens, so this leaves much more headroom for input.
+_GENERATE_MAX_TOKENS = 16_000
+_VALIDATE_MAX_TOKENS = 16_000
 _TEMPERATURE = 0.15  # lower than Scout chat's 0.2 — verification should be conservative
 
 _INCONCLUSIVE_CAP_HIT = "Could not reach a verdict within the investigation budget — try narrowing the hypothesis to one specific, testable claim."
@@ -95,16 +111,28 @@ def _validate_system_prompt(workspace_id: int, dataset_id: int | None) -> str:
     )
 
 
-def _generate_system_prompt(workspace_id: int, dataset_id: int | None, count: int) -> str:
+def _generate_system_prompt(
+    workspace_id: int, dataset_id: int | None, count: int, business_context: str | None = None,
+) -> str:
     scope = (
         f"Focus on dataset id {dataset_id} in this workspace, but reference other "
         "datasets too if you find a cross-dataset pattern worth surfacing."
         if dataset_id is not None
         else "Investigate across the whole workspace, including cross-dataset relationships (run_workspace_sql/run_workspace_python) where they reveal something interesting."
     )
+    context_line = (
+        f"\n\nBusiness context driving this investigation: \"{business_context.strip()[:1500]}\"\n"
+        "Prioritize hypotheses about what actually drives the outcome/target this context implies (e.g. churn, "
+        "disengagement, revenue leakage, upsell/cross-sell) over generic data-quality observations — favor "
+        "run_statistical_test and get_correlations against that outcome, and feature importance to identify which "
+        "columns matter most for it. This should read like a data scientist scoping features and drivers for a "
+        "model, not a profiling report.\n"
+        if business_context and business_context.strip() else ""
+    )
     return (
         f"You are Scout's hypothesis-generation mode, scoped to workspace #{workspace_id} "
-        f"(internal id, not a dataset_id). {scope}\n\n"
+        f"(internal id, not a dataset_id). {scope}\n"
+        f"{context_line}\n"
         f"Investigate the data and propose up to {count} hypotheses — but only after "
         "using tools to verify each one actually holds. Every hypothesis you report must "
         "already carry the real evidence that supports it (a correlation with its p-value, "
@@ -269,14 +297,18 @@ def run_hypothesis_validation_stream(
 
 def run_hypothesis_generation(
     *, workspace_id: int, dataset_id: int | None, count: int, db: Session, user: User,
+    business_context: str | None = None,
 ) -> dict[str, Any]:
-    """Returns {"hypotheses": list[dict], "tool_trace": [...]}."""
+    """Returns {"hypotheses": list[dict], "tool_trace": [...]}.
+    `business_context`, if given, steers which hypotheses get prioritized
+    (e.g. from an Auto EDA run) rather than leaving it purely exploratory —
+    see run_auto_eda_stream's "hypothesis_investigation" worklist item."""
     provider = get_provider()
     if provider is None:
         return {"hypotheses": [], "tool_trace": [], "error": _NO_PROVIDER_MSG}
 
     scope_msg = f"Generate up to {count} hypotheses" + (f" about dataset id {dataset_id}." if dataset_id is not None else " about this workspace.")
-    messages = _build_messages(_generate_system_prompt(workspace_id, dataset_id, count), scope_msg)
+    messages = _build_messages(_generate_system_prompt(workspace_id, dataset_id, count, business_context), scope_msg)
     tool_trace: list[dict[str, Any]] = []
     final_content: str | None = None
 

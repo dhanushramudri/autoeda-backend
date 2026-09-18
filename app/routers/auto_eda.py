@@ -11,7 +11,10 @@ from ..database import get_db
 from ..models.auto_eda import AutoEdaChatMessage, AutoEdaRun
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..schemas.auto_eda import AutoEdaChatMessageOut, AutoEdaChatSend, AutoEdaRunCreate, AutoEdaRunOut
+from ..schemas.auto_eda import (
+    AutoEdaAiEditRequest, AutoEdaAiEditResponse, AutoEdaChatMessageOut, AutoEdaChatSend,
+    AutoEdaRunCreate, AutoEdaRunOut, AutoEdaRunUpdate,
+)
 
 logger = logging.getLogger("autoeda.routers.auto_eda")
 
@@ -160,6 +163,87 @@ def download_run(
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+_ACTIVE_STATUSES = ("pending", "running", "pausing")
+
+
+@router.patch("/runs/{run_id}", response_model=AutoEdaRunOut)
+def update_run_markdown(
+    workspace_id: int,
+    run_id: int,
+    payload: AutoEdaRunUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Direct manual save of the report's raw markdown — the canvas's plain
+    edit mode, no AI involved. Blocked while the background pipeline is
+    actively writing to this same field (run_auto_eda_stream's own
+    markdown += chunk loop) to avoid a lost-update race between a live
+    run and a manual edit landing at the same time."""
+    _assert_member(workspace_id, current_user, db)
+    run = _get_run(workspace_id, run_id, db)
+    if run.status in _ACTIVE_STATUSES:
+        raise HTTPException(status_code=400, detail="Can't edit while the run is actively in progress — pause it first")
+    run.markdown = payload.markdown
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return _serialize(run)
+
+
+@router.post("/runs/{run_id}/ai-edit", response_model=AutoEdaAiEditResponse)
+def ai_edit_selection(
+    workspace_id: int,
+    run_id: int,
+    payload: AutoEdaAiEditRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Rewrites exactly the highlighted excerpt per a free-text instruction —
+    the canvas's "select text, ask AI" editing mode. Scoped to the selection
+    only: the model only ever sees the excerpt, never the rest of the
+    report, so it can't touch anything outside what the user selected."""
+    from ..ai.llm import get_provider
+    from ..ai.providers.base import QuotaExceededError
+
+    _assert_member(workspace_id, current_user, db)
+    run = _get_run(workspace_id, run_id, db)
+    if run.status in _ACTIVE_STATUSES:
+        raise HTTPException(status_code=400, detail="Can't edit while the run is actively in progress — pause it first")
+
+    markdown = run.markdown or ""
+    if payload.selected_text not in markdown:
+        raise HTTPException(status_code=400, detail="That text no longer matches the current report — reload and try again")
+
+    provider = get_provider()
+    if provider is None:
+        raise HTTPException(status_code=503, detail="AI isn't configured")
+
+    prompt = (
+        "You are editing one excerpt of a larger Markdown report — you only see this excerpt, not the whole "
+        "report, so rewrite ONLY what's given here and preserve its Markdown formatting conventions (headers, "
+        "tables, bold, etc.) unless the instruction says otherwise. Never invent statistics or numbers that "
+        "aren't already in the excerpt.\n\n"
+        f"Excerpt:\n\"\"\"\n{payload.selected_text}\n\"\"\"\n\n"
+        f"Instruction: \"{payload.instruction.strip()}\"\n\n"
+        "Respond with ONLY the rewritten excerpt — no preamble, no explanation, no markdown code fences around it."
+    )
+    try:
+        replacement = provider.generate(prompt, temperature=0.3, max_tokens=4000)
+    except QuotaExceededError:
+        raise HTTPException(status_code=429, detail="AI quota exceeded — try again later")
+    if not replacement or not replacement.strip():
+        raise HTTPException(status_code=502, detail="AI returned an empty response — try rephrasing the instruction")
+    replacement = replacement.strip()
+    if replacement.startswith("```"):
+        replacement = replacement.strip("`").strip()
+
+    new_markdown = markdown.replace(payload.selected_text, replacement, 1)
+    run.markdown = new_markdown
+    db.add(run)
+    db.commit()
+    return AutoEdaAiEditResponse(markdown=new_markdown, replacement=replacement)
 
 
 def _run_in_background(

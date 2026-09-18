@@ -34,3 +34,21 @@ class AutoEdaChatMessageOut(BaseModel):
     role: str
     content: str
     created_at: datetime
+
+
+class AutoEdaRunUpdate(BaseModel):
+    """Manual, direct save of the report's raw markdown source — the
+    canvas's plain-text edit mode. No AI involved."""
+    markdown: str = Field(max_length=2_000_000)
+
+
+class AutoEdaAiEditRequest(BaseModel):
+    """Selection-scoped AI edit: rewrite exactly the highlighted excerpt per
+    a free-text instruction, leaving the rest of the report untouched."""
+    selected_text: str = Field(min_length=1, max_length=20_000)
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class AutoEdaAiEditResponse(BaseModel):
+    markdown: str
+    replacement: str
