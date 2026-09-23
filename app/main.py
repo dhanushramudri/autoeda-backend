@@ -15,7 +15,7 @@ Path("uploads").mkdir(exist_ok=True)
 
 from .database import init_db
 from .process_pool import shutdown_pool
-from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router, dataset_docs, scout, hypotheses, auto_eda
+from .routers import auth, datasets, eda, jobs, workspaces, extra, sql_editor, join_builder, sources, warehouse, ai as ai_router, feedback as feedback_router, dataset_docs, coe_posts, scout, hypotheses, auto_eda, experiments
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,9 +223,11 @@ app.include_router(warehouse.router, prefix="/api/v1")
 app.include_router(ai_router.router, prefix="/api/v1")
 app.include_router(feedback_router.router, prefix="/api/v1")
 app.include_router(dataset_docs.router, prefix="/api/v1")
+app.include_router(coe_posts.router, prefix="/api/v1")
 app.include_router(scout.router, prefix="/api/v1")
 app.include_router(hypotheses.router, prefix="/api/v1")
 app.include_router(auto_eda.router, prefix="/api/v1")
+app.include_router(experiments.router, prefix="/api/v1")
 # app.include_router(realtime_router.router, prefix="/api/v1")
 
 

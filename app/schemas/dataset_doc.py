@@ -66,6 +66,8 @@ class DocArticleCreate(BaseModel):
     title: str
     summary: Optional[str] = None
     content: str = ""
+    status: str = "draft"
+    tags: list[str] = []
     dataset_ids: list[int] = []
 
 
@@ -74,6 +76,8 @@ class DocArticleUpdate(BaseModel):
     title: Optional[str] = None
     summary: Optional[str] = None
     content: Optional[str] = None
+    status: Optional[str] = None
+    tags: Optional[list[str]] = None
     dataset_ids: Optional[list[int]] = None
 
 
@@ -83,6 +87,8 @@ class DocArticleListItem(BaseModel):
     title: str
     summary: Optional[str] = None
     content_preview: str = ""
+    status: str = "draft"
+    tags: list[str] = []
     created_by: int
     created_by_name: Optional[str] = None
     created_at: datetime

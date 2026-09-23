@@ -42,7 +42,7 @@ def init_db():
         user, workspace, dataset, job,
         pipeline_step, column_metadata, data_quality_rule,
         eda_run, saved_chart, named_segment, data_source, feedback,
-        dataset_doc, scout, hypothesis, auto_eda,
+        dataset_doc, scout, hypothesis, auto_eda, coe_post, experiment,
     )
     # When using Alembic this is a no-op safety net for fresh installs only.
     # Run `alembic upgrade head` for proper migrations.
@@ -50,6 +50,10 @@ def init_db():
     _migrate_feedback_attachments()
     _migrate_feedback_comment_parent()
     _migrate_dataset_refresh_column()
+    _migrate_doc_article_columns()
+    _migrate_coe_post_columns()
+    _migrate_experiment_columns()
+    _migrate_hypothesis_columns()
     _seed_admin()
     _seed_playbook_categories()
     _seed_test_user()
@@ -124,6 +128,92 @@ def _migrate_dataset_refresh_column():
     if "last_synced_version" not in existing:
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE datasets ADD COLUMN last_synced_version VARCHAR(64)"))
+            conn.commit()
+
+
+def _migrate_doc_article_columns():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("doc_articles")}
+    except Exception:
+        return  # table doesn't exist yet — create_all will handle it
+
+    if "status" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE doc_articles ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'draft'"))
+            conn.commit()
+
+    if "tags_json" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE doc_articles ADD COLUMN tags_json TEXT"))
+            conn.commit()
+
+
+def _migrate_coe_post_columns():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("coe_posts")}
+    except Exception:
+        return  # table doesn't exist yet — create_all will handle it
+
+    if "tags_json" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE coe_posts ADD COLUMN tags_json TEXT"))
+            conn.commit()
+
+
+def _migrate_experiment_columns():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("experiments")}
+    except Exception:
+        return  # table doesn't exist yet — create_all will handle it
+
+    if "excluded_columns_json" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE experiments ADD COLUMN excluded_columns_json TEXT"))
+            conn.commit()
+
+    if "auto_planned" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE experiments ADD COLUMN auto_planned BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.commit()
+
+    if "rationale" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE experiments ADD COLUMN rationale TEXT"))
+            conn.commit()
+
+    if "engineered_features_json" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE experiments ADD COLUMN engineered_features_json TEXT"))
+            conn.commit()
+
+
+def _migrate_hypothesis_columns():
+    """stop_requested was added via Alembic migration 0014, which — like
+    every migration past 0003 — never actually applies on SQLite (the whole
+    chain dies there; see the Dockerfile's `alembic upgrade head || echo
+    ...`). Same fix as everywhere else in this file: check for the column
+    directly and add it if it's missing, on any DB file, not just the one
+    that already got patched by hand once in production."""
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("hypotheses")}
+    except Exception:
+        return  # table doesn't exist yet — create_all will handle it
+
+    if "stop_requested" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE hypotheses ADD COLUMN stop_requested BOOLEAN NOT NULL DEFAULT FALSE"))
             conn.commit()
 
 

@@ -77,6 +77,7 @@ def _article_list_item(db: Session, a: DocArticle, viewer: User) -> DocArticleLi
     return DocArticleListItem(
         id=a.id, category_id=a.category_id, title=a.title, summary=a.summary,
         content_preview=_content_preview(a.content),
+        status=a.status, tags=json.loads(a.tags_json) if a.tags_json else [],
         created_by=a.created_by, created_by_name=_user_name(db, a.created_by),
         created_at=a.created_at,
         updated_by=a.updated_by, updated_by_name=_user_name(db, a.updated_by),
@@ -164,6 +165,7 @@ def get_article(
     attachments = db.query(DocAttachment).filter(DocAttachment.article_id == a.id).all()
     return DocArticleResponse(
         id=a.id, category_id=a.category_id, title=a.title, summary=a.summary, content=a.content,
+        status=a.status, tags=json.loads(a.tags_json) if a.tags_json else [],
         created_by=a.created_by, created_by_name=_user_name(db, a.created_by),
         created_at=a.created_at,
         updated_by=a.updated_by, updated_by_name=_user_name(db, a.updated_by),
@@ -207,6 +209,7 @@ def create_article(
     a = DocArticle(
         category_id=payload.category_id, title=payload.title.strip(),
         summary=payload.summary, content=payload.content,
+        status=payload.status or "draft", tags_json=json.dumps(payload.tags) if payload.tags else None,
         created_by=current_user.id, updated_by=current_user.id,
     )
     db.add(a)
@@ -238,6 +241,10 @@ def update_article(
         a.summary = payload.summary
     if payload.content is not None:
         a.content = payload.content
+    if payload.status is not None:
+        a.status = payload.status
+    if payload.tags is not None:
+        a.tags_json = json.dumps(payload.tags) if payload.tags else None
     if payload.dataset_ids is not None:
         _set_dataset_links(db, a.id, payload.dataset_ids, current_user)
     a.updated_by = current_user.id

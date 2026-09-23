@@ -38,6 +38,13 @@ class DocArticle(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # status: draft | active | retired — a real CoE playbook library needs to
+    # tell "this is the current standard approach" apart from a stale one
+    # nobody's pruned yet. tags_json: freeform searchable labels (tech stack,
+    # client/industry, technique) — a JSON list, same convention as
+    # AutoEdaRun.worklist_json elsewhere in this codebase.
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    tags_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
