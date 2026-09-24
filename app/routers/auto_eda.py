@@ -341,11 +341,20 @@ def resume_auto_eda_run(
 ):
     _assert_member(workspace_id, current_user, db)
     run = _get_run(workspace_id, run_id, db)
-    if run.status != "paused":
-        raise HTTPException(status_code=400, detail=f"Run is {run.status}, not paused — nothing to resume")
+    # "error" is included alongside "paused" — a run the stale-watchdog
+    # reaped after the server crashed/restarted mid-run (see _reap_if_stale)
+    # looks identical to a manually-paused one: the worklist and markdown
+    # from every item completed so far are fully intact, so replaying from
+    # scratch would just re-spend the AI calls (and time) that already
+    # succeeded. Only worth offering when there's actually a worklist to
+    # pick back up — a run that errored before planning even started has
+    # nothing to resume.
+    if run.status not in ("paused", "error") or not run.worklist_json:
+        raise HTTPException(status_code=400, detail=f"Run is {run.status}, not paused/resumable — nothing to resume")
 
     dataset_ids = json.loads(run.dataset_ids_json or "[]")
     run.status = "running"
+    run.error = None
     db.add(run)
     db.commit()
 
