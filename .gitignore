@@ -156,3 +156,12 @@ downloads/
 logs/
 .vercel
 app/aws_ec2_script.txt
+
+# Reference/working documents (slide decks, generated reports, etc.) —
+# these are large binary artifacts for local analysis/testing, not project
+# source, and shouldn't end up in commits.
+*.pdf
+*.ppt
+*.pptx
+*.doc
+*.docx

@@ -1450,7 +1450,15 @@ def run_auto_eda_stream(
         if item["status"] != "pending":  # skipped by steering, or already handled
             i += 1
             continue
-        ds, df = loaded[item["dataset_id"]]
+        did = item["dataset_id"]
+        if did not in loaded:
+            # Evicted below because nothing pending referenced it at the
+            # time — self-review or a chat instruction can still add a new
+            # item against it afterward, so reload on demand rather than
+            # assuming eviction was final.
+            ds = _get_authorized_dataset(did, user, db)
+            loaded[did] = (ds, _load_df(ds, row_limit=MAX_ROWS))
+        ds, df = loaded[did]
         df_columns = list(df.columns)
 
         item["status"] = "running"
@@ -1500,6 +1508,22 @@ def run_auto_eda_stream(
             followups = deduped
             room = max_total - len(worklist)
             worklist.extend(followups[:room])
+
+        # Free this dataset's DataFrame the moment nothing PENDING still
+        # needs it, instead of holding every dataset in a multi-dataset run
+        # in memory for the run's entire duration — the actual cause of a
+        # real production OOM kill (4 datasets, one 186K rows x 41 cols,
+        # held simultaneously start to finish). Reloaded on demand above if
+        # something added later (self-review, chat steering) turns out to
+        # need it again — evicting is a memory optimization, not a
+        # correctness guarantee about what's "done".
+        still_needed = {it["dataset_id"] for it in worklist if it["status"] == "pending"}
+        to_evict = [d for d in loaded if d not in still_needed]
+        if to_evict:
+            for evict_id in to_evict:
+                del loaded[evict_id]
+            import gc
+            gc.collect()
 
         _persist(db, run_row, worklist, markdown, "running")
         yield {"type": "item_done", "index": i, "item": item, "markdown_chunk": chunk}
