@@ -146,6 +146,96 @@ def render_line(x: list, y: list, title: str, ylabel: str = "") -> str:
     return _to_data_uri(fig)
 
 
+def render_rate_bar(
+    categories: list[str], rates: list[float], title: str,
+    counts: list[int] | None = None, total_n: int | None = None, rate_label: str = "Rate",
+) -> str:
+    """Horizontal bar of a target rate (e.g. % churn) per category bucket —
+    the single-feature "deep dive" shape used throughout the reference EDA
+    deck (e.g. churn rate by connection count, by membership band). When
+    counts + total_n are given, each y-tick also shows that bucket's share
+    of all accounts, so a big bar on a tiny bucket doesn't read as more
+    important than a small bar covering most of the base."""
+    if counts is not None and total_n:
+        labels = [f"{c}  ({100 * n / total_n:.0f}% of accounts)" for c, n in zip(categories, counts)]
+    else:
+        labels = categories
+    fig, ax = _new_fig((7, max(3.2, 0.55 * len(categories))))
+    y = range(len(categories))
+    bars = ax.barh(list(y), rates, color=ACCENT_PINK)
+    ax.set_yticks(list(y))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()  # first category at the top, matching the source table order
+    ax.set_title(title, fontsize=11, fontweight="bold", color=BRAND_PRIMARY)
+    ax.set_xlabel(rate_label, fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="x", color="#E0E0E0", linewidth=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    for b, v in zip(bars, rates):
+        ax.annotate(f"{v:.0f}%", (b.get_width(), b.get_y() + b.get_height() / 2),
+                    ha="left", va="center", fontsize=8, xytext=(4, 0), textcoords="offset points")
+    fig.tight_layout()
+    return _to_data_uri(fig)
+
+
+def render_rate_line(x: list[float], rates: list[float], title: str, xlabel: str, ylabel: str = "Rate", trend: bool = False) -> str:
+    """Smoothed target-rate-vs-continuous-feature line — e.g. churn rate by
+    tenure — the other deep-dive shape in the reference deck, distinct from
+    render_rate_bar because the feature is numeric/ordered rather than a
+    small set of named buckets. An optional dotted linear trend line names
+    the direction in one glance, same as the reference deck's tenure slide."""
+    fig, ax = _new_fig()
+    ax.plot(x, rates, color=ACCENT_PINK, linewidth=2.2, label=ylabel)
+    if trend and len(x) >= 2:
+        import numpy as np
+        coeffs = np.polyfit(x, rates, 1)
+        trend_y = [coeffs[0] * xi + coeffs[1] for xi in x]
+        ax.plot(x, trend_y, color="#999999", linewidth=1.2, linestyle=":", label=f"Linear ({ylabel})")
+        ax.legend(fontsize=8, frameon=False)
+    ax.set_title(title, fontsize=11, fontweight="bold", color=BRAND_PRIMARY)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(color="#E0E0E0", linewidth=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    return _to_data_uri(fig)
+
+
+def render_rate_heatmap(
+    row_labels: list[str], col_labels: list[str],
+    rate_matrix: list[list[float | None]], count_matrix: list[list[int | None]], title: str,
+) -> str:
+    """Two-way interaction matrix — a target rate for every (row category,
+    column category) pair, each cell annotated with both the rate and the
+    underlying count (a 40% rate on 3 accounts and a 40% rate on 3,000
+    accounts are not equally trustworthy). Matches the reference deck's
+    "Connections & Bands" style matrices — the highest-value chart a real
+    analyst reaches for once two categorical drivers are both known to
+    matter individually."""
+    n_rows, n_cols = len(row_labels), len(col_labels)
+    fig, ax = plt.subplots(figsize=(max(5, n_cols * 1.1), max(3.5, n_rows * 0.7)))
+    fig.patch.set_facecolor("white")
+    cmap = LinearSegmentedColormap.from_list("jman_sequential", ["#FFFFFF", ACCENT_TEAL])
+    data = [[v if v is not None else 0.0 for v in row] for row in rate_matrix]
+    im = ax.imshow(data, cmap=cmap, vmin=0, vmax=max(1.0, max((v for row in data for v in row), default=1.0)))
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels(col_labels, rotation=30, ha="right", fontsize=8)
+    ax.set_yticklabels(row_labels, fontsize=8)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            rate, count = rate_matrix[i][j], count_matrix[i][j]
+            if rate is None:
+                continue
+            color = "white" if rate > (im.get_clim()[1] * 0.6) else BRAND_TEXT
+            ax.text(j, i, f"{rate:.0f}%\n{count:,}", ha="center", va="center", fontsize=7, color=color)
+    ax.set_title(title, fontsize=11, fontweight="bold", color=BRAND_PRIMARY)
+    fig.colorbar(im, ax=ax, shrink=0.8, label="Rate")
+    fig.tight_layout()
+    return _to_data_uri(fig)
+
+
 def render_box(labels: list[str], data: list[list[float]], title: str) -> str:
     fig, ax = _new_fig()
     bp = ax.boxplot(data, tick_labels=labels, patch_artist=True,

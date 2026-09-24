@@ -54,6 +54,7 @@ def init_db():
     _migrate_coe_post_columns()
     _migrate_experiment_columns()
     _migrate_hypothesis_columns()
+    _migrate_auto_eda_columns()
     _seed_admin()
     _seed_playbook_categories()
     _seed_test_user()
@@ -214,6 +215,21 @@ def _migrate_hypothesis_columns():
     if "stop_requested" not in existing:
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE hypotheses ADD COLUMN stop_requested BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.commit()
+
+
+def _migrate_auto_eda_columns():
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        existing = {c["name"] for c in inspector.get_columns("auto_eda_runs")}
+    except Exception:
+        return  # table doesn't exist yet — create_all will handle it
+
+    if "max_items" not in existing:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE auto_eda_runs ADD COLUMN max_items INTEGER"))
             conn.commit()
 
 

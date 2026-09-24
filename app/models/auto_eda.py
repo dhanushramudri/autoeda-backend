@@ -41,6 +41,11 @@ class AutoEdaRun(Base):
     # follow-ups relevant to what the user actually cares about, rather
     # than mechanically enumerating every column.
     business_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # User-set cap on how many worklist items this run may plan/grow to
+    # (1-100, enforced at the API layer — see schemas/auto_eda.py). Null on
+    # rows created before this existed, or if left blank — falls back to
+    # settings.AUTO_EDA_MAX_ITEMS (see auto_eda_orchestrator.run_auto_eda_stream).
+    max_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
     worklist_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -74,7 +74,7 @@ def _serialize(run: AutoEdaRun) -> AutoEdaRunOut:
     return AutoEdaRunOut(
         id=run.id, workspace_id=run.workspace_id,
         dataset_ids=json.loads(run.dataset_ids_json) if run.dataset_ids_json else [],
-        status=run.status, title=run.title, business_context=run.business_context, markdown=run.markdown,
+        status=run.status, title=run.title, business_context=run.business_context, max_items=run.max_items, markdown=run.markdown,
         worklist=json.loads(run.worklist_json) if run.worklist_json else [],
         error=run.error, created_at=run.created_at, updated_at=run.updated_at,
     )
@@ -297,6 +297,7 @@ def start_auto_eda_run(
         workspace_id=workspace_id, dataset_ids_json=json.dumps(payload.dataset_ids),
         created_by=current_user.id, status="pending",
         business_context=(payload.business_context or "").strip() or None,
+        max_items=payload.max_items,
     )
     db.add(run_row)
     db.commit()

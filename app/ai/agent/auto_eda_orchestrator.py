@@ -102,11 +102,19 @@ _VALID_KINDS = {
     "profile", "missing", "quality_score", "correlations",
     "distribution", "outliers", "categorical_breakdown",
     "timeseries", "text_analysis", "custom_python", "feature_importance",
-    "hypothesis_investigation", "target_relationship",
+    "hypothesis_investigation", "target_relationship", "two_way_relationship",
 }
 
 # Kind -> which arg keys name a column that must actually exist on the dataset.
-_COLUMN_ARG_KEYS = ("column", "time_col", "value_col", "target", "feature")
+_COLUMN_ARG_KEYS = ("column", "time_col", "value_col", "target", "feature", "feature2")
+
+# Bucket count for a numeric feature's rate-vs-feature line (render_rate_line)
+# — enough resolution to see the shape (the reference deck's tenure chart
+# has ~25 distinct x-values) without so many bins that each one's rate is
+# noise from a handful of rows.
+_TARGET_RATE_BINS = 20
+_TARGET_RATE_MIN_BIN_ROWS = 5
+_MAX_CATEGORY_BUCKETS = 12
 
 _FEATURE_IMPORTANCE_METHODS = ["rf", "metadata", "correlation", "anova", "mi"]
 _FEATURE_IMPORTANCE_TIMEOUT_S = 240  # matches the existing manual feature-importance endpoint's own timeout
@@ -626,6 +634,49 @@ def _md_table(headers: list[str], rows: list[list[Any]]) -> str:
     return "\n".join(out)
 
 
+def _outcome_value(df: pd.DataFrame, target: str):
+    """Which single value of `target` is "the outcome" a rate should be
+    computed against — e.g. picking out "Churned" from a
+    Renewed/Churned/Pending column. Not given by the user, so inferred: the
+    least-frequent value is almost always the alarming/rare outcome a churn
+    or conversion analysis is actually about (the majority class is "nothing
+    happened"), and this holds whether the target has 2 values or several."""
+    counts = df[target].value_counts()
+    if counts.empty:
+        return None
+    return counts.index[-1]
+
+
+def _target_rate_by_bucket(bucket_series: pd.Series, is_outcome: pd.Series) -> tuple[list, list[float], list[int]]:
+    """Groups an already-bucketed feature (category labels, or a
+    pd.cut/pd.qcut result) against a boolean "is this row the outcome"
+    series, returning (bucket labels in natural order, rate % per bucket,
+    row count per bucket). Shared by both the numeric and categorical
+    target_relationship paths so they can't silently diverge in how a rate
+    is computed."""
+    grouped = is_outcome.groupby(bucket_series, observed=True)
+    rates = (grouped.mean() * 100).round(1)
+    counts = grouped.size()
+    labels = list(rates.index)
+    return labels, [float(v) for v in rates.values], [int(v) for v in counts.values]
+
+
+def _bucket_for_two_way(series: pd.Series, max_buckets: int = 6) -> pd.Series:
+    """Reduces any column — numeric or categorical — to a small set of
+    labeled buckets suitable for a two-way matrix's rows/columns. Numeric
+    columns get quantile-binned (labeled by their range); categorical
+    columns are truncated to their most common values (rare ones collapsed
+    into "Other") so a high-cardinality column doesn't blow the matrix up
+    to an unreadable size."""
+    if pd.api.types.is_numeric_dtype(series):
+        try:
+            return pd.qcut(series, q=min(max_buckets, series.nunique()), duplicates="drop").astype(str)
+        except (ValueError, IndexError):
+            return series.astype(str)
+    top = series.value_counts().head(max_buckets).index
+    return series.where(series.isin(top), other="Other").astype(str)
+
+
 _CUSTOM_TABLE_MAX_ROWS = 20
 
 
@@ -744,6 +795,16 @@ def _execute_item(
         return result, "No usable text found in this column."
 
     if kind == "target_relationship":
+        # This is the "single feature deep dive" from the reference EDA
+        # deck — churn (or whatever outcome) rate as a function of ONE
+        # feature, not a plain profile of the feature in isolation. The
+        # previous version of this analysis plotted mean(feature) grouped
+        # by target class, which answers a different, less useful question
+        # ("what's the average tenure of churners") than the one the
+        # business actually wants ("as tenure increases, does churn drop") —
+        # this rebuild computes the latter, matching the deck's own
+        # "Churn Rate by Tenure" / "Connections" / "Membership Status"
+        # slides exactly: a rate per bucket, ordered, with a real chart.
         feature, target = args["feature"], args["target"]
         if feature not in df.columns or target not in df.columns:
             return {"error": "column not found"}, None
@@ -754,24 +815,108 @@ def _execute_item(
         if "error" in stat:
             return stat, f"_Could not test `{feature}` against `{target}`: {stat['error']}_"
 
+        work = df[[feature, target]].dropna()
+        outcome = _outcome_value(work, target)
+        if outcome is None:
+            return stat, f"_`{target}` has no usable values to compute a rate against._"
+        is_outcome = work[target] == outcome
+        rate_label = f"% {target} = {outcome}"
+
         if feature_is_numeric:
-            means = df.groupby(target)[feature].mean().round(3).sort_index()
-            table = _md_table([target, f"mean {feature}"], [[str(k), v] for k, v in means.items()])
-            img = cr.render_bar([str(k) for k in means.index], [float(v) for v in means.values], f"Mean {feature} by {target}", feature)
+            try:
+                bucket = pd.qcut(work[feature], q=_TARGET_RATE_BINS, duplicates="drop")
+            except (ValueError, IndexError):
+                bucket = pd.cut(work[feature], bins=min(_TARGET_RATE_BINS, work[feature].nunique() or 1))
+            labels, rates, counts = _target_rate_by_bucket(bucket, is_outcome)
+            filtered = [(lbl, r, c) for lbl, r, c in zip(labels, rates, counts) if c >= _TARGET_RATE_MIN_BIN_ROWS]
+            labels, rates, counts = map(list, zip(*filtered)) if filtered else ([], [], [])
+            midpoints = [iv.mid for iv in labels] if labels else []
+            table = _md_table([feature, "n", rate_label], [
+                [str(lbl), c, f"{r}%"] for lbl, r, c in zip(labels, rates, counts)
+            ])
+            img = (
+                cr.render_rate_line(list(midpoints), list(rates), f"{rate_label} by {feature}", feature, rate_label, trend=True)
+                if midpoints else None
+            )
         else:
-            top_cats = df[feature].value_counts().head(10).index
-            ct = (pd.crosstab(df[feature], df[target], normalize="index") * 100).round(1)
-            ct = ct.loc[ct.index.intersection(top_cats)]
-            table = _md_table([feature] + [str(c) for c in ct.columns], [[str(idx)] + [f"{v}%" for v in row] for idx, row in ct.iterrows()])
-            img = None
+            bucket = df.loc[work.index, feature]
+            top_cats = bucket.value_counts().head(_MAX_CATEGORY_BUCKETS).index
+            keep = bucket.isin(top_cats)
+            labels, rates, counts = _target_rate_by_bucket(bucket[keep], is_outcome[keep])
+            # Real category columns are rarely clean — near-duplicate spellings,
+            # blank strings, and one-off typos each become their own bucket
+            # with a handful of rows. A bucket too small to say anything
+            # meaningful about its rate just adds noise to the chart.
+            kept_idx = [i for i, c in enumerate(counts) if c >= _TARGET_RATE_MIN_BIN_ROWS]
+            labels = [labels[i] for i in kept_idx]
+            rates = [rates[i] for i in kept_idx]
+            counts = [counts[i] for i in kept_idx]
+            order = sorted(range(len(counts)), key=lambda i: -counts[i])
+            labels, rates, counts = [labels[i] for i in order], [rates[i] for i in order], [counts[i] for i in order]
+            display_labels = [str(l).strip() or "(blank)" for l in labels]
+            table = _md_table([feature, "n", "% of accounts", rate_label], [
+                [lbl, c, f"{100 * c / len(work):.0f}%", f"{r}%"] for lbl, r, c in zip(display_labels, rates, counts)
+            ])
+            img = (
+                cr.render_rate_bar(display_labels, rates, f"{rate_label} by {feature}",
+                                    counts=counts, total_n=len(work), rate_label=rate_label)
+                if labels else None
+            )
 
         body = (
-            f"**`{feature}` vs `{target}`** — {stat['test'].upper()}: statistic={stat['statistic']:.3f}, "
-            f"p={stat['p_value']:.4f} → {stat['interpretation']}\n\n{table}"
+            f"**`{feature}` vs `{target}`** (rate of `{target} = {outcome}`) — {stat['test'].upper()}: "
+            f"statistic={stat['statistic']:.3f}, p={stat['p_value']:.4f} → {stat['interpretation']}\n\n{table}"
         )
         if img:
             body += f"\n\n![{feature} by {target}]({img})"
+        stat["outcome_value"] = str(outcome)
         return stat, body
+
+    if kind == "two_way_relationship":
+        # The reference deck's other signature shape: once two categorical
+        # features are each individually known to relate to the outcome,
+        # cross them — e.g. "Connections & Bands" — to see whether they
+        # compound (a low-connection AND low-band account may churn far
+        # more than either factor alone suggests).
+        feature, feature2, target = args["feature"], args["feature2"], args["target"]
+        missing = [c for c in (feature, feature2, target) if c not in df.columns]
+        if missing:
+            return {"error": f"column(s) not found: {missing}"}, None
+
+        work = df[[feature, feature2, target]].dropna()
+        outcome = _outcome_value(work, target)
+        if outcome is None:
+            return {"error": "no usable target values"}, f"_`{target}` has no usable values to compute a rate against._"
+        is_outcome = work[target] == outcome
+
+        row_bucket = _bucket_for_two_way(work[feature])
+        col_bucket = _bucket_for_two_way(work[feature2])
+        row_labels = list(dict.fromkeys(row_bucket.value_counts().index))[:_MAX_CATEGORY_BUCKETS]
+        col_labels = list(dict.fromkeys(col_bucket.value_counts().index))[:_MAX_CATEGORY_BUCKETS]
+
+        rate_matrix, count_matrix, rows_out = [], [], []
+        for r in row_labels:
+            rate_row, count_row = [], []
+            for c in col_labels:
+                mask = (row_bucket == r) & (col_bucket == c)
+                n = int(mask.sum())
+                if n < _TARGET_RATE_MIN_BIN_ROWS:
+                    rate_row.append(None); count_row.append(None)
+                    continue
+                rate_row.append(round(100 * is_outcome[mask].mean(), 1))
+                count_row.append(n)
+            rate_matrix.append(rate_row); count_matrix.append(count_row)
+            rows_out.append({"row": str(r), "cells": [
+                {"col": str(c), "rate": rate_row[i], "n": count_row[i]} for i, c in enumerate(col_labels)
+            ]})
+
+        img = cr.render_rate_heatmap(
+            [str(r) for r in row_labels], [str(c) for c in col_labels], rate_matrix, count_matrix,
+            f"{feature} × {feature2} — % {target} = {outcome}",
+        )
+        result = {"feature": feature, "feature2": feature2, "target": target, "outcome_value": str(outcome), "matrix": rows_out}
+        body = f"**`{feature}` × `{feature2}`** — rate of `{target} = {outcome}` per combination\n\n![{feature} by {feature2}]({img})"
+        return result, body
 
     if kind == "feature_importance":
         target = args["target"]
@@ -922,18 +1067,49 @@ def _caption_for(item: dict, result: dict, provider, business_context: str | Non
 _FOLLOWUP_SCHEMA_HINT = (
     'Respond with ONLY a JSON array (no markdown fences), 0 to 2 items, each shaped:\n'
     '{"kind": "correlations"|"distribution"|"outliers"|"categorical_breakdown"|"timeseries"|"text_analysis"|'
-    '"feature_importance"|"custom_python", "title": "<short title>", "args": {...}} — for '
+    '"feature_importance"|"target_relationship"|"two_way_relationship"|"custom_python", "title": "<short title>", '
+    '"args": {...}} — for '
     '"distribution"/"categorical_breakdown"/"text_analysis" args is {"column": "<existing column name>"}; for '
     '"timeseries" args is {"time_col": "...", "value_col": "..."}; for "correlations"/"outliers" args is '
     '{"columns": ["...", "..."]}; for "feature_importance" args is {"target": "<existing column name>"} — use this '
     'when a finding suggests a specific column is (or might be) the outcome/target worth explaining, to rank every '
-    'other feature\'s relationship to it; for "custom_python" args is {"code": "<python using df, pd, np — assign '
+    'other feature\'s relationship to it; for "target_relationship" args is {"feature": "...", "target": "..."} — '
+    'the single most valuable follow-up when a business context names an outcome: computes and charts that '
+    'outcome\'s RATE across buckets of one feature (e.g. churn rate by tenure), not just a correlation number — use '
+    'this liberally for any feature that plausibly drives the outcome, not only the single top-ranked one; for '
+    '"two_way_relationship" args is {"feature": "...", "feature2": "...", "target": "..."} — crosses two features '
+    'already individually shown to relate to the outcome, to see whether they compound (a matrix of outcome rate '
+    'per combination); for "custom_python" args is {"code": "<python using df, pd, np — assign '
     'to result>"}. '
     "Only propose a follow-up if this specific finding genuinely warrants deeper investigation — "
     "an empty array is a completely valid answer, and is expected most of the time. When a business context is "
-    "given, a good follow-up often examines a feature's relationship to whatever outcome/target it implies, not "
-    "just the column in isolation."
+    "given, a good follow-up often examines a feature's relationship to whatever outcome/target it implies via "
+    "target_relationship, not just the column in isolation."
 )
+
+
+def _deterministic_followups(item: dict, result: dict) -> list[dict]:
+    """A small number of follow-ups too valuable to leave to the LLM's
+    discretion — same philosophy as _enumerate_candidates seeding the
+    initial worklist itself rather than trusting the model to think of it.
+    Once feature_importance has ranked a target's drivers, the reference
+    deck's next move is always the same: cross the top two CATEGORICAL
+    drivers into a two-way rate matrix (its "Connections & Bands" slide).
+    Restricted to categorical pairs because that's what a matrix of named
+    buckets reads as; two continuous features would need a scatter/heatmap
+    of a different shape entirely."""
+    if item["kind"] != "feature_importance" or result.get("error"):
+        return []
+    target = item["args"].get("target")
+    meta = result.get("top_feature_detail") or []
+    categorical_top = [
+        m["feature"] for m in meta
+        if m.get("dtype") not in (None, "float64", "float32", "int64", "int32", "bool")
+    ][:2]
+    if len(categorical_top) < 2 or not target:
+        return []
+    a, b = categorical_top
+    return [_new_item("two_way_relationship", f"`{a}` × `{b}` vs `{target}`", {"feature": a, "feature2": b, "target": target})]
 
 
 def _suggest_followups(item: dict, result: dict, df_columns: list[str], provider, business_context: str | None = None) -> list[dict]:
@@ -987,11 +1163,14 @@ _STEERING_SCHEMA_HINT = (
     '{"remove": [<worklist index>, ...], "add": [{"kind": "...", "title": "...", "args": {...}, "dataset_id": <id>}, ...], '
     '"reply": "<one short sentence telling the user what you changed, or why you didn\'t>"}\n'
     'kind must be one of: profile, missing, quality_score, correlations, distribution, outliers, '
-    'categorical_breakdown, timeseries, text_analysis, feature_importance, custom_python. args follows the same '
+    'categorical_breakdown, timeseries, text_analysis, feature_importance, target_relationship, '
+    'two_way_relationship, custom_python. args follows the same '
     'shape as a follow-up: distribution/categorical_breakdown/text_analysis -> {"column": "..."}; '
     'timeseries -> {"time_col": "...", "value_col": "..."}; correlations/outliers -> {"columns": [...]}; '
     'feature_importance -> {"target": "<existing column name>"} (ranks every other feature\'s relationship to that '
-    'target); custom_python -> {"code": "<python using df, pd, np — assign to result>"}. '
+    'target); target_relationship -> {"feature": "...", "target": "..."} (charts the target\'s rate across buckets '
+    'of one feature); two_way_relationship -> {"feature": "...", "feature2": "...", "target": "..."} (a rate matrix '
+    'for two features combined); custom_python -> {"code": "<python using df, pd, np — assign to result>"}. '
     'dataset_id must be one of the dataset ids listed below. '
     '"remove" and "add" may both be empty — e.g. if the message is just a question rather than an instruction — '
     "but always include a short \"reply\"."
@@ -1201,7 +1380,10 @@ def run_auto_eda_stream(
     from ...config import settings
 
     multi = len(loaded) > 1
-    items_ceiling = getattr(settings, "AUTO_EDA_MAX_ITEMS", MAX_TOTAL_ITEMS_CEILING)
+    # A per-run choice from the AutoEdaRunCreate payload (1-100, enforced
+    # there) now takes precedence over the old fixed env var — see
+    # AutoEdaRunCreate.max_items and the AutoEdaPanel run-start UI.
+    items_ceiling = run_row.max_items or getattr(settings, "AUTO_EDA_MAX_ITEMS", MAX_TOTAL_ITEMS_CEILING)
     max_total = min(MAX_TOTAL_ITEMS * len(loaded), items_ceiling)
 
     if resume and run_row.worklist_json:
@@ -1298,7 +1480,7 @@ def run_auto_eda_stream(
 
         followups = []
         if len(worklist) < max_total:
-            followups = _suggest_followups(item, result, df_columns, provider, business_context)
+            followups = _deterministic_followups(item, result) + _suggest_followups(item, result, df_columns, provider, business_context)
             for f in followups:
                 f["dataset_id"] = item["dataset_id"]
                 if multi:

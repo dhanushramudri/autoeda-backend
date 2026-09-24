@@ -8,6 +8,10 @@ class AutoEdaRunCreate(BaseModel):
     # Optional explicit report title — defaults to the workspace name when
     # left blank (see auto_eda_orchestrator.run_auto_eda_stream).
     report_title: str | None = Field(default=None, max_length=200)
+    # How many worklist items this run may plan/grow to — previously fixed
+    # server-side via the AUTO_EDA_MAX_ITEMS env var; now a per-run choice.
+    # Left blank falls back to that same env var (see run_auto_eda_stream).
+    max_items: int | None = Field(default=None, ge=1, le=100)
 
 
 class AutoEdaRunOut(BaseModel):
@@ -17,6 +21,7 @@ class AutoEdaRunOut(BaseModel):
     status: str
     title: str | None
     business_context: str | None
+    max_items: int | None = None
     markdown: str | None
     worklist: list[dict] = []
     error: str | None
