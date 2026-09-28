@@ -17,6 +17,9 @@ def _uniform_threshold(n_features: int) -> float:
 
 
 EXPENSIVE_METHOD_SAMPLE_CAP = 3000
+# RF fit + k-fold CV on the full dataset blew past the container's memory limit
+# on large datasets; importances are stable well below this many rows.
+RF_SAMPLE_CAP = 50_000
 INTERACTION_SAMPLE_CAP = 300
 INTERACTION_MAX_FEATURES = 30
 REDUNDANCY_TOP_K = 20
@@ -27,6 +30,19 @@ def _sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int = EXPENSIVE_METHOD_SAM
     if len(X) <= cap:
         return X, y
     idx = np.random.RandomState(seed).choice(len(X), size=cap, replace=False)
+    return X.iloc[idx], y[idx]
+
+
+def _stratified_sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int, seed: int = 42):
+    """Like _sample_rows, but keeps each class's share of rows for classification targets."""
+    if len(X) <= cap:
+        return X, y
+    from sklearn.model_selection import train_test_split
+    try:
+        idx, _ = train_test_split(np.arange(len(X)), train_size=cap, stratify=y, random_state=seed)
+    except ValueError:
+        # A class with a single row can't be stratified — fall back to a plain random sample.
+        return _sample_rows(X, y, cap=cap, seed=seed)
     return X.iloc[idx], y[idx]
 
 
@@ -133,7 +149,9 @@ def _group_redundant(pairs: list[tuple[str, str, float]]) -> list[dict]:
     return groups
 
 
-def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | None = None) -> dict:
+def run_feature_importance(
+    df: pd.DataFrame, target: str, methods: list[str] | None = None, exclude: list[str] | None = None,
+) -> dict:
     """
     Run feature importance analysis with lazy loading support.
 
@@ -142,6 +160,9 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         target: Target column name
         methods: List of methods to compute. If None, compute only ['rf', 'metadata'].
                  Available: ['rf', 'correlation', 'mi', 'anova', 'permutation', 'shap', 'stability', 'interactions']
+        exclude: Columns to leave out of the feature set. Dropped here (inside the pool
+                 worker) rather than by the caller, so the API process never holds a
+                 second copy of the DataFrame.
 
     Returns:
         dict with computed results. 'computed_methods' field tracks which methods were computed.
@@ -181,7 +202,8 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     if target not in df.columns:
         return {**empty, "error": f"Column '{target}' not found"}
 
-    df_clean = df.dropna(subset=[target]).copy()
+    drop_cols = [c for c in (exclude or []) if c in df.columns and c != target]
+    df_clean = df.drop(columns=drop_cols).dropna(subset=[target])
     y_raw = df_clean[target]
     n_samples = len(df_clean)
 
@@ -273,11 +295,16 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
     if "rf" in methods_set or "permutation" in methods_set or "shap" in methods_set:
         try:
             clf = (
-                RandomForestClassifier(n_estimators=25, max_depth=10, random_state=42, n_jobs=-1, oob_score=True)
+                RandomForestClassifier(n_estimators=25, max_depth=10, random_state=42, n_jobs=1, oob_score=True)
                 if problem_type == "classification"
-                else RandomForestRegressor(n_estimators=25, max_depth=10, random_state=42, n_jobs=-1, oob_score=True)
+                else RandomForestRegressor(n_estimators=25, max_depth=10, random_state=42, n_jobs=1, oob_score=True)
             )
-            clf.fit(X, y_aligned)
+            X_fit, y_fit = (
+                _stratified_sample_rows(X, y_aligned, cap=RF_SAMPLE_CAP)
+                if problem_type == "classification"
+                else _sample_rows(X, y_aligned, cap=RF_SAMPLE_CAP)
+            )
+            clf.fit(X_fit, y_fit)
             model_score = round(float(clf.oob_score_), 4)
             for feat, imp in zip(X.columns, clf.feature_importances_):
                 rf_map[str(feat)] = round(float(imp), 6)
@@ -296,14 +323,14 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         try:
             from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
             if problem_type == "classification":
-                min_class_count = int(pd.Series(y_aligned).value_counts().min())
+                min_class_count = int(pd.Series(y_fit).value_counts().min())
                 n_folds = max(2, min(5, min_class_count))
                 splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
-                n_folds = max(2, min(5, n_samples // 20))
+                n_folds = max(2, min(5, len(X_fit) // 20))
                 splitter = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             cv_clf = clf.__class__(**clf.get_params())
-            scores = cross_val_score(cv_clf, X, y_aligned, cv=splitter, n_jobs=-1)
+            scores = cross_val_score(cv_clf, X_fit, y_fit, cv=splitter, n_jobs=1)
             cv_score_mean = round(float(scores.mean()), 4)
             cv_score_std = round(float(scores.std()), 4)
         except Exception:
@@ -503,7 +530,7 @@ def run_feature_importance(df: pd.DataFrame, target: str, methods: list[str] | N
         try:
             X_perm, y_perm = _sample_rows(X, y_aligned)
             perm_result = permutation_importance(
-                clf, X_perm, y_perm, n_repeats=5, random_state=42, n_jobs=-1
+                clf, X_perm, y_perm, n_repeats=5, random_state=42, n_jobs=1
             )
             for feat, imp, std in zip(X.columns, perm_result.importances_mean, perm_result.importances_std):
                 perm_importances.append({

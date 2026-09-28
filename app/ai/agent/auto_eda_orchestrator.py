@@ -923,11 +923,10 @@ def _execute_item(
         if target not in df.columns:
             return {"error": f"target column not found: {target}"}, None
         exclude = [c for c in args.get("exclude", []) if c in df.columns and c != target]
-        feature_df = df.drop(columns=exclude) if exclude else df
         try:
             result = run_isolated(
-                run_feature_importance, feature_df, target,
-                methods=_FEATURE_IMPORTANCE_METHODS, timeout=_FEATURE_IMPORTANCE_TIMEOUT_S,
+                run_feature_importance, df, target,
+                methods=_FEATURE_IMPORTANCE_METHODS, exclude=exclude, timeout=_FEATURE_IMPORTANCE_TIMEOUT_S,
             )
         except (AnalysisTimeout, AnalysisCrashed) as e:
             return {"error": str(e)}, f"_Feature importance analysis for `{target}` timed out or crashed: {e}_"
@@ -1342,6 +1341,37 @@ def _persist(db: Session, run_row, worklist: list[dict], markdown: str, status: 
     db.commit()
 
 
+def _shrink_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast numeric columns in place (int64 -> smallest int, float64 -> float32
+    where pandas judges it lossless). The whole run keeps this DataFrame resident in
+    the API process and pickles it to a pool worker per analysis, so its footprint
+    counts twice against the container's memory limit. Object/string columns are
+    left alone — converting them to category changes how select_dtypes and the
+    label-encoding paths downstream treat them."""
+    for col in df.select_dtypes(include="integer").columns:
+        df[col] = pd.to_numeric(df[col], downcast="integer")
+    for col in df.select_dtypes(include="floating").columns:
+        df[col] = pd.to_numeric(df[col], downcast="float")
+    return df
+
+
+def _load_shrunk(load_df, ds) -> pd.DataFrame:
+    return _shrink_df(load_df(ds, row_limit=MAX_ROWS))
+
+
+def _release_memory() -> None:
+    """Collect garbage and hand freed heap pages back to the OS. glibc keeps freed
+    memory mapped by default, so without malloc_trim the API process's RSS only ever
+    ratchets up across items — which is what the container's cgroup limit counts."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # not glibc (local Windows/macOS dev) — nothing to trim
+
+
 def run_auto_eda_stream(
     *, workspace_id: int, dataset_ids: list[int], db: Session, user: User, run_row, resume: bool = False,
     business_context: str | None = None, require_approval: bool = True, report_title: str | None = None,
@@ -1388,8 +1418,7 @@ def run_auto_eda_stream(
     try:
         for did in dataset_ids:
             ds = _get_authorized_dataset(did, user, db)
-            df = _load_df(ds, row_limit=MAX_ROWS)
-            loaded[did] = (ds, df)
+            loaded[did] = (ds, _load_shrunk(_load_df, ds))
     except Exception as e:
         yield {"type": "error", "message": f"Could not load dataset: {e}"}
         _persist(db, run_row, [], "", "error", error=str(e))
@@ -1475,7 +1504,7 @@ def run_auto_eda_stream(
             # item against it afterward, so reload on demand rather than
             # assuming eviction was final.
             ds = _get_authorized_dataset(did, user, db)
-            loaded[did] = (ds, _load_df(ds, row_limit=MAX_ROWS))
+            loaded[did] = (ds, _load_shrunk(_load_df, ds))
         ds, df = loaded[did]
         df_columns = list(df.columns)
 
@@ -1537,11 +1566,12 @@ def run_auto_eda_stream(
         # correctness guarantee about what's "done".
         still_needed = {it["dataset_id"] for it in worklist if it["status"] == "pending"}
         to_evict = [d for d in loaded if d not in still_needed]
-        if to_evict:
-            for evict_id in to_evict:
-                del loaded[evict_id]
-            import gc
-            gc.collect()
+        for evict_id in to_evict:
+            del loaded[evict_id]
+        # Drop this item's references before trimming, so its intermediates
+        # (results, chart buffers, and the evicted DataFrame) are actually freed.
+        del df, result, body
+        _release_memory()
 
         _persist(db, run_row, worklist, markdown, "running")
         yield {"type": "item_done", "index": i, "item": item, "markdown_chunk": chunk}
