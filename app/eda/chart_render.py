@@ -50,7 +50,12 @@ _DIVERGING_CMAP = LinearSegmentedColormap.from_list("jman_diverging", [ACCENT_WI
 _FIGSIZE = (7, 4)
 _DPI = 110
 
-matplotlib.rcParams["font.family"] = ["Arial", "DejaVu Sans", "sans-serif"]
+# Only list Arial when it's actually installed — the slim Docker image has no Arial,
+# and a missing family makes matplotlib log a findfont warning for every text
+# element of every chart (hundreds of log lines per Auto EDA item).
+from matplotlib import font_manager as _fm
+_HAS_ARIAL = any(f.name == "Arial" for f in _fm.fontManager.ttflist)
+matplotlib.rcParams["font.family"] = (["Arial"] if _HAS_ARIAL else []) + ["DejaVu Sans", "sans-serif"]
 matplotlib.rcParams["text.color"] = BRAND_TEXT
 matplotlib.rcParams["axes.labelcolor"] = BRAND_TEXT
 matplotlib.rcParams["xtick.color"] = BRAND_TEXT
