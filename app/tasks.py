@@ -47,6 +47,9 @@ def _load_dataframe(dataset_id: int, file_path: str | None, config: dict):
                 return FileConnector().load_data(cfg)
             elif ds.file_data:
                 return load_from_bytes(ds.file_data, filename, cfg)
+            elif ds.external_storage_uri:
+                from .dataset_storage import fetch_external_bytes
+                return load_from_bytes(fetch_external_bytes(ds), filename, cfg)
             else:
                 raise FileNotFoundError(f"No file data for dataset {dataset_id}")
         elif src in ("postgresql", "mysql", "sqlite", "mssql"):

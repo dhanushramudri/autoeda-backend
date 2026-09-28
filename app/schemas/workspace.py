@@ -15,6 +15,11 @@ class WorkspaceUpdate(BaseModel):
     accent_color: Optional[str] = None
 
 
+class StorageDestinationUpdate(BaseModel):
+    # None clears it back to the default (store in our own database).
+    source_id: Optional[int] = None
+
+
 class WorkspaceMemberInfo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,6 +42,7 @@ class WorkspaceResponse(BaseModel):
     member_count: int = 0
     dataset_count: int = 0
     source_count: int = 0
+    storage_destination_source_id: Optional[int] = None
     members: list[WorkspaceMemberInfo] = []
 
 

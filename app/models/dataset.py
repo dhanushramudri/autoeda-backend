@@ -34,6 +34,11 @@ class Dataset(Base):
     source_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     file_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # Set only when the workspace has a storage destination configured and this
+    # dataset's bytes were routed there instead of into file_data above — see
+    # app/dataset_storage.py. Null for every dataset stored the default way.
+    external_storage_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    external_storage_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     column_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

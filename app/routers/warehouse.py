@@ -73,6 +73,10 @@ def _register_dataset(con, view_name: str, ds: Dataset):
         elif ds.file_data:
             filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
             df = load_from_bytes(ds.file_data, filename, config)
+        elif ds.external_storage_uri:
+            from ..dataset_storage import fetch_external_bytes
+            filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
+            df = load_from_bytes(fetch_external_bytes(ds), filename, config)
         else:
             raise ValueError(f"Dataset '{ds.name}' has no file data in database")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql", "mongodb"):
@@ -121,7 +125,11 @@ def _get_ready_datasets(wid: int, db: Session, load_data: bool = False) -> list[
         .filter(
             dataset_visibility_filter(db, wid),
             Dataset.status == "ready",
-            or_(Dataset.file_data.isnot(None), Dataset.file_path.isnot(None)),
+            or_(
+                Dataset.file_data.isnot(None),
+                Dataset.file_path.isnot(None),
+                Dataset.external_storage_uri.isnot(None),
+            ),
         )
         .order_by(Dataset.name)
     )

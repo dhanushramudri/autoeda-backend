@@ -9,6 +9,7 @@ from ..models.user import User
 from ..models.workspace import Workspace, WorkspaceMember
 from ..schemas.workspace import (
     AddMemberRequest,
+    StorageDestinationUpdate,
     WorkspaceCreate,
     WorkspaceMemberInfo,
     WorkspaceResponse,
@@ -47,6 +48,7 @@ def _build_response(ws: Workspace, db: Session) -> WorkspaceResponse:
         member_count=len(members),
         dataset_count=dataset_count,
         source_count=source_count,
+        storage_destination_source_id=ws.storage_destination_source_id,
         members=members,
     )
 
@@ -121,6 +123,43 @@ def update_workspace(
         ws.description = payload.description
     if payload.accent_color is not None:
         ws.accent_color = payload.accent_color
+    db.commit()
+    db.refresh(ws)
+    return _build_response(ws, db)
+
+
+@router.put("/{workspace_id}/storage-destination", response_model=WorkspaceResponse)
+def set_storage_destination(
+    workspace_id: int,
+    payload: StorageDestinationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Choose where NEW file uploads for this workspace get stored.
+
+    Leave `source_id` null to keep the default (our own database) — nothing
+    already stored moves when this changes, only what's uploaded from here on."""
+    from ..dataset_storage import DESTINATION_CAPABLE_TYPES
+
+    ws = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    _assert_role(workspace_id, current_user, db, ["admin"])
+
+    if payload.source_id is not None:
+        src = db.query(DataSource).filter(
+            DataSource.id == payload.source_id,
+            DataSource.workspace_id == workspace_id,
+        ).first()
+        if not src:
+            raise HTTPException(status_code=404, detail="Data source not found in this workspace")
+        if src.source_type not in DESTINATION_CAPABLE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{src.source_type}' sources can't be used as a storage destination yet",
+            )
+
+    ws.storage_destination_source_id = payload.source_id
     db.commit()
     db.refresh(ws)
     return _build_response(ws, db)

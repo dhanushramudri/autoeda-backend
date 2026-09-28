@@ -130,11 +130,13 @@ def _load_dataset_df(dataset_id: Union[str, int], db: Session, workspace_id: int
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
-        if not ds.file_data:
-            raise HTTPException(status_code=400, detail=f"Dataset {dataset_id} has no accessible file data")
         filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-        # Use database bytes only (file-based data stored in DB)
-        return load_from_bytes(ds.file_data, filename, config)
+        if ds.file_data:
+            return load_from_bytes(ds.file_data, filename, config)
+        if ds.external_storage_uri:
+            from ..dataset_storage import fetch_external_bytes
+            return load_from_bytes(fetch_external_bytes(ds), filename, config)
+        raise HTTPException(status_code=400, detail=f"Dataset {dataset_id} has no accessible file data")
     else:
         # DB / API connectors — load via tasks helper
         from ..connectors.db_connector import DBConnector

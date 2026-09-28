@@ -1088,28 +1088,46 @@ _FOLLOWUP_SCHEMA_HINT = (
 )
 
 
+_TWO_WAY_TOP_N = 3  # 3 features -> C(3,2) = 3 matrices, matching the reference
+# deck exactly (its 3 appendix matrices are pairwise combinations of exactly
+# 3 recurring drivers: Connections, Bands, Membership Status).
+_NUMERIC_DTYPES = ("float64", "float32", "int64", "int32", "bool")
+
+
 def _deterministic_followups(item: dict, result: dict) -> list[dict]:
     """A small number of follow-ups too valuable to leave to the LLM's
     discretion — same philosophy as _enumerate_candidates seeding the
     initial worklist itself rather than trusting the model to think of it.
     Once feature_importance has ranked a target's drivers, the reference
-    deck's next move is always the same: cross the top two CATEGORICAL
-    drivers into a two-way rate matrix (its "Connections & Bands" slide).
-    Restricted to categorical pairs because that's what a matrix of named
-    buckets reads as; two continuous features would need a scatter/heatmap
-    of a different shape entirely."""
+    deck's next move is always the same: cross the top CATEGORICAL drivers
+    pairwise into two-way rate matrices (its "Connections & Bands" /
+    "Membership Status & Connections" / "Membership Status & Bands"
+    slides — 3 features, all 3 pairs shown, not just one). Restricted to
+    categorical features because that's what a matrix of named buckets
+    reads as; two continuous features would need a scatter of a different
+    shape entirely. Leakage suspects are excluded — crossing a near-perfect
+    proxy for the target with a real driver would misleadingly read as two
+    genuine factors compounding, not one column that's basically the
+    answer key."""
     if item["kind"] != "feature_importance" or result.get("error"):
         return []
     target = item["args"].get("target")
+    if not target:
+        return []
     meta = result.get("top_feature_detail") or []
+    leaky = {s["feature"] for s in (result.get("leakage_suspects") or [])}
     categorical_top = [
         m["feature"] for m in meta
-        if m.get("dtype") not in (None, "float64", "float32", "int64", "int32", "bool")
-    ][:2]
-    if len(categorical_top) < 2 or not target:
+        if m.get("dtype") not in (None, *_NUMERIC_DTYPES) and m["feature"] not in leaky
+    ][:_TWO_WAY_TOP_N]
+    if len(categorical_top) < 2:
         return []
-    a, b = categorical_top
-    return [_new_item("two_way_relationship", f"`{a}` × `{b}` vs `{target}`", {"feature": a, "feature2": b, "target": target})]
+
+    from itertools import combinations
+    return [
+        _new_item("two_way_relationship", f"`{a}` × `{b}` vs `{target}`", {"feature": a, "feature2": b, "target": target})
+        for a, b in combinations(categorical_top, 2)
+    ]
 
 
 def _suggest_followups(item: dict, result: dict, df_columns: list[str], provider, business_context: str | None = None) -> list[dict]:

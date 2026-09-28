@@ -55,6 +55,7 @@ def init_db():
     _migrate_experiment_columns()
     _migrate_hypothesis_columns()
     _migrate_auto_eda_columns()
+    _migrate_storage_destination_columns()
     _seed_admin()
     _seed_playbook_categories()
     _seed_test_user()
@@ -129,6 +130,38 @@ def _migrate_dataset_refresh_column():
     if "last_synced_version" not in existing:
         with engine.connect() as conn:
             conn.execute(text("ALTER TABLE datasets ADD COLUMN last_synced_version VARCHAR(64)"))
+            conn.commit()
+
+
+def _migrate_storage_destination_columns():
+    """Client-chosen storage destination: nullable everywhere, so a fresh
+    install and every existing row keep behaving exactly as before until a
+    workspace explicitly opts into an external destination."""
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        workspace_cols = {c["name"] for c in inspector.get_columns("workspaces")}
+        dataset_cols = {c["name"] for c in inspector.get_columns("datasets")}
+    except Exception:
+        return
+
+    if "storage_destination_source_id" not in workspace_cols:
+        with engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE workspaces ADD COLUMN storage_destination_source_id INTEGER "
+                "REFERENCES data_sources(id)"
+            ))
+            conn.commit()
+
+    if "external_storage_type" not in dataset_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE datasets ADD COLUMN external_storage_type VARCHAR(20)"))
+            conn.commit()
+
+    if "external_storage_uri" not in dataset_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE datasets ADD COLUMN external_storage_uri VARCHAR(500)"))
             conn.commit()
 
 

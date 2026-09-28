@@ -69,6 +69,10 @@ def _load_df(ds: Dataset) -> pd.DataFrame:
         elif ds.file_data:
             filename = _os.path.basename(ds.file_path or "") if ds.file_path else ""
             return load_from_bytes(ds.file_data, filename, config)
+        elif ds.external_storage_uri:
+            from ..dataset_storage import fetch_external_bytes
+            filename = _os.path.basename(ds.file_path or "") if ds.file_path else ""
+            return load_from_bytes(fetch_external_bytes(ds), filename, config)
         raise FileNotFoundError(f"No file data available for dataset {ds.id}")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql", "mongodb"):
         config["db_type"] = ds.source_type

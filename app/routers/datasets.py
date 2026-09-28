@@ -100,8 +100,14 @@ async def create_dataset(
         content_hash = hashlib.md5(content).hexdigest()
         file_size = len(content)
 
-        # Store file bytes in DB — works in every environment (no disk required)
-        ds.file_data = content
+        from ..dataset_storage import get_destination_source, store_uploaded_file
+        dest = get_destination_source(db, workspace_id)
+        storage_fields = store_uploaded_file(db, workspace_id, dataset_id, file.filename or "dataset", content)
+        ds.file_data = storage_fields["file_data"]
+        ds.external_storage_type = storage_fields["external_storage_type"]
+        ds.external_storage_uri = storage_fields["external_storage_uri"]
+        if dest is not None:
+            ds.source_id = dest.id  # needed later to fetch the bytes back from that destination
         ds.content_hash = content_hash
         ds.file_size_bytes = file_size
         ds.file_path = file.filename  # original filename kept for extension detection only
@@ -200,12 +206,22 @@ async def confirm_dataset_upload(
         source_config=json.dumps(config),
         status="processing",
         created_by=current_user.id,
-        file_data=content,
         content_hash=content_hash,
         file_size_bytes=len(content),
         file_path=original_filename,
     )
     db.add(ds)
+    db.flush()
+
+    from ..dataset_storage import get_destination_source, store_uploaded_file
+    dest = get_destination_source(db, workspace_id)
+    storage_fields = store_uploaded_file(db, workspace_id, ds.id, original_filename, content)
+    ds.file_data = storage_fields["file_data"]
+    ds.external_storage_type = storage_fields["external_storage_type"]
+    ds.external_storage_uri = storage_fields["external_storage_uri"]
+    if dest is not None:
+        ds.source_id = dest.id
+
     db.commit()
     db.refresh(ds)
 
@@ -430,10 +446,16 @@ def import_dataset_to_workspace(
     if not source:
         raise HTTPException(status_code=404, detail="Dataset not found")
     assert_dataset_access(source, current_user, db)
-    if not source.file_data:
+    if not source.file_data and not source.external_storage_uri:
         raise HTTPException(status_code=400, detail="This dataset has no file data to import")
 
     _assert_member(payload.workspace_id, current_user, db, ["admin", "analyst"])
+
+    if source.file_data:
+        content = source.file_data
+    else:
+        from ..dataset_storage import fetch_external_bytes
+        content = fetch_external_bytes(source)
 
     ds = Dataset(
         workspace_id=payload.workspace_id,
@@ -443,12 +465,22 @@ def import_dataset_to_workspace(
         source_config=source.source_config,
         status="processing",
         created_by=current_user.id,
-        file_data=source.file_data,
         content_hash=source.content_hash,
         file_size_bytes=source.file_size_bytes,
         file_path=source.file_path,
     )
     db.add(ds)
+    db.flush()
+
+    from ..dataset_storage import get_destination_source, store_uploaded_file
+    dest = get_destination_source(db, payload.workspace_id)
+    storage_fields = store_uploaded_file(db, payload.workspace_id, ds.id, source.file_path or source.name, content)
+    ds.file_data = storage_fields["file_data"]
+    ds.external_storage_type = storage_fields["external_storage_type"]
+    ds.external_storage_uri = storage_fields["external_storage_uri"]
+    if dest is not None:
+        ds.source_id = dest.id
+
     db.commit()
     db.refresh(ds)
 
@@ -716,13 +748,24 @@ def transform_dataset(
         except Exception as e:
             errors_log.append({"op": op_type, "error": str(e)})
 
-    # Save transformed result back to DB as CSV bytes
+    # Save transformed result — respects the workspace's storage destination,
+    # same as a fresh upload would.
     buf = io.BytesIO()
     df.to_csv(buf, index=False)
     csv_bytes = buf.getvalue()
-    ds.file_data = csv_bytes
+    new_path = (ds.file_path or "").rsplit(".", 1)[0] + ".csv" if ds.file_path else "transformed.csv"
+
+    from ..dataset_storage import get_destination_source, store_uploaded_file
+    dest = get_destination_source(db, ds.workspace_id)
+    storage_fields = store_uploaded_file(db, ds.workspace_id, ds.id, new_path, csv_bytes)
+    ds.file_data = storage_fields["file_data"]
+    ds.external_storage_type = storage_fields["external_storage_type"]
+    ds.external_storage_uri = storage_fields["external_storage_uri"]
+    if dest is not None:
+        ds.source_id = dest.id
+
     ds.file_size_bytes = len(csv_bytes)
-    ds.file_path = (ds.file_path or "").rsplit(".", 1)[0] + ".csv" if ds.file_path else "transformed.csv"
+    ds.file_path = new_path
     ds.content_hash = hashlib.md5(csv_bytes).hexdigest()
     ds.row_count = len(df)
     ds.column_count = len(df.columns)
@@ -786,11 +829,13 @@ def _load_dataset_df(ds: Dataset, limit: int = None):
     config = json.loads(ds.source_config or "{}")
 
     if ds.source_type == "file":
-        if not ds.file_data:
-            raise HTTPException(status_code=400, detail=f"Dataset {ds.id} has no file data in database")
         filename = os.path.basename(ds.file_path or "") if ds.file_path else ""
-        # Use database bytes only (file-based data stored in DB)
-        return load_from_bytes(ds.file_data, filename, config)
+        if ds.file_data:
+            return load_from_bytes(ds.file_data, filename, config)
+        if ds.external_storage_uri:
+            from ..dataset_storage import fetch_external_bytes
+            return load_from_bytes(fetch_external_bytes(ds), filename, config)
+        raise HTTPException(status_code=400, detail=f"Dataset {ds.id} has no file data in database")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
         config["db_type"] = ds.source_type
         return DBConnector().load_data(config, limit=limit)
@@ -818,6 +863,12 @@ def _load_dataset_for_export(ds: Dataset) -> "pd.DataFrame":
         filename = os.path.basename(ds.file_path or "") if ds.file_path else "data.parquet"
         config = json.loads(ds.source_config or "{}")
         return load_from_bytes(ds.file_data, filename, config)
+    if ds.external_storage_uri:
+        from ..connectors.file_connector import load_from_bytes
+        from ..dataset_storage import fetch_external_bytes
+        filename = os.path.basename(ds.file_path or "") if ds.file_path else "data.parquet"
+        config = json.loads(ds.source_config or "{}")
+        return load_from_bytes(fetch_external_bytes(ds), filename, config)
     raise HTTPException(status_code=400, detail="Dataset has no exportable data on disk")
 
 

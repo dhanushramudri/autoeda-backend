@@ -90,6 +90,9 @@ def _load_df(ds: Dataset, row_limit: Optional[int] = None):
             return FileConnector().load_data(config)
         elif ds.file_data:
             return load_from_bytes(ds.file_data, filename, config)
+        elif ds.external_storage_uri:
+            from ..dataset_storage import fetch_external_bytes
+            return load_from_bytes(fetch_external_bytes(ds), filename, config)
         else:
             raise FileNotFoundError(f"No file data available for dataset {ds.id}")
     elif ds.source_type in ("postgresql", "mysql", "sqlite", "mssql"):
