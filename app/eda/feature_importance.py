@@ -46,6 +46,20 @@ def _stratified_sample_rows(X: pd.DataFrame, y: np.ndarray, cap: int, seed: int 
     return X.iloc[idx], y[idx]
 
 
+# Categorical levels kept per column before building a contingency table or group
+# split. Two high-cardinality columns (dates-as-strings, IDs) crossed at full
+# resolution made a dense table of billions of cells and OOM-killed the worker.
+_ASSOC_MAX_LEVELS = 50
+
+
+def _cap_levels(s: pd.Series, max_levels: int = _ASSOC_MAX_LEVELS) -> pd.Series:
+    """Keep the most frequent levels and fold the long tail into one bucket."""
+    if s.nunique() <= max_levels:
+        return s
+    top = s.value_counts().index[:max_levels]
+    return s.where(s.isin(top), "__other__")
+
+
 def _assoc(s1: pd.Series, s2: pd.Series, s1_num: bool, s2_num: bool) -> tuple[float | None, float | None]:
     """
     Statistically appropriate association strength between two series, routed by type
@@ -76,6 +90,7 @@ def _assoc(s1: pd.Series, s2: pd.Series, s1_num: bool, s2_num: bool) -> tuple[fl
 
     if s1_num != s2_num:
         num_s, cat_s = (a, b) if s1_num else (b, a)
+        cat_s = _cap_levels(cat_s)
         n_levels = cat_s.nunique()
         if n_levels < 2:
             return None, None
@@ -102,7 +117,7 @@ def _assoc(s1: pd.Series, s2: pd.Series, s1_num: bool, s2_num: bool) -> tuple[fl
 
     # categorical x categorical -> Cramer's V; no F-statistic equivalent exists for this pairing
     try:
-        ct = pd.crosstab(a, b)
+        ct = pd.crosstab(_cap_levels(a), _cap_levels(b))
         v = _cramers_v(ct)
         return v, None
     except Exception:
