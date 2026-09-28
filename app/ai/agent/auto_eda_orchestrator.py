@@ -62,7 +62,10 @@ from ...models.user import User
 
 logger = logging.getLogger("autoeda.ai.agent.auto_eda")
 
-MAX_ROWS = 200_000  # keeps a full autonomous run fast — not the per-analysis max a human picks manually
+# Keeps a full autonomous run fast and inside the container's memory limit — not
+# the per-analysis max a human picks manually. At 200K rows the API process alone
+# reached 2.7 GB and was OOM-killed.
+MAX_ROWS = 75_000
 MAX_TOTAL_ITEMS = 150  # per dataset, before the overall ceiling below applies
 # Guardrail: a run — single- or multi-dataset — never plans more than this
 # many items total. This exists purely to bound pathological cases (a
@@ -1356,7 +1359,14 @@ def _shrink_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_shrunk(load_df, ds) -> pd.DataFrame:
-    return _shrink_df(load_df(ds, row_limit=MAX_ROWS))
+    df = load_df(ds, row_limit=MAX_ROWS)
+    # row_limit only applies to connector sources — uploaded files load in full,
+    # so cap here too. A random sample (kept in original row order, so timeseries
+    # checks still see a chronological series) represents the data far better
+    # than the first N rows would.
+    if len(df) > MAX_ROWS:
+        df = df.sample(n=MAX_ROWS, random_state=42).sort_index().reset_index(drop=True)
+    return _shrink_df(df)
 
 
 def _release_memory() -> None:
