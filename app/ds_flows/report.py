@@ -128,8 +128,15 @@ def apply_quarantine(results: dict) -> None:
                 h["note"] = "feature quarantined as likely recorded at or after the decision"
         hy["supported"] = sum(h["verdict"] == "supported" for h in hy["hypotheses"])
     eda = results.get("eda")
-    if eda and eda.get("driver_bins"):
-        eda["driver_bins"] = [d for d in eda["driver_bins"] if d["feature"] not in q]
+    if eda:
+        for key in ("driver_bins", "distributions", "outliers", "profile"):
+            if eda.get(key):
+                eda[key] = [d for d in eda[key] if d["feature"] not in q]
+        cor = eda.get("correlation")
+        if cor:
+            keep = [i for i, f in enumerate(cor["features"]) if f not in q]
+            cor["features"] = [cor["features"][i] for i in keep]
+            cor["matrix"] = [[cor["matrix"][i][j] for j in keep] for i in keep]
 
 
 def build_headline(results: dict) -> dict:

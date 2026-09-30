@@ -47,7 +47,11 @@ def _assert_member(workspace_id: int, user: User, db: Session):
 
 def _visible_datasets(workspace_id: int, db: Session, only: list[int] | None = None) -> list[Dataset]:
     """Every ready dataset in the workspace (plus the shared global library)."""
-    q = db.query(Dataset).options(sa_defer(Dataset.file_data)).filter(dataset_visibility_filter(db, workspace_id), Dataset.status == "ready")
+    from sqlalchemy import or_
+
+    q = (db.query(Dataset).options(sa_defer(Dataset.file_data))
+         .filter(dataset_visibility_filter(db, workspace_id), Dataset.status == "ready")
+         .filter(or_(Dataset.source_config.is_(None), Dataset.source_config.notlike('%"ds_flow_run"%'))))
     if only:
         q = q.filter(Dataset.id.in_(only))
     return q.order_by(Dataset.id).all()
@@ -104,6 +108,7 @@ def _full(run: DsFlowRun) -> dict:
             "dictionary": bool(run.dictionary_csv), "model": bool(run.model_blob),
         },
         "source_filename": run.source_filename,
+        "working_dataset_id": (_j(run.params_json) or {}).get("working_dataset_id"),
     }
 
 
@@ -215,7 +220,13 @@ def get_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), curre
 @router.delete("/runs/{run_id}")
 def delete_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
     _assert_member(workspace_id, current_user, db)
-    db.delete(_get_run(workspace_id, run_id, db))
+    run = _get_run(workspace_id, run_id, db)
+    wid = (_j(run.params_json) or {}).get("working_dataset_id")
+    if wid:  # the hidden working table goes with the run
+        ws = db.query(Dataset).filter(Dataset.id == wid).first()
+        if ws is not None and '"ds_flow_run"' in (ws.source_config or ""):
+            db.delete(ws)
+    db.delete(run)
     db.commit()
     return {"message": "Run deleted"}
 

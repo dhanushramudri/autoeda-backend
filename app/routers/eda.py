@@ -151,9 +151,11 @@ def get_profile(
         df = _load_df(ds)
         from ..eda.profiler import run_profile
         result = _run_isolated(run_profile, df)
-        if ds.file_path:
-            import os
+        import os
+        if ds.file_path and os.path.exists(ds.file_path):
             result["file_size_bytes"] = os.path.getsize(ds.file_path)
+        elif ds.file_size_bytes:
+            result["file_size_bytes"] = ds.file_size_bytes
         store_result(db, dataset_id, "profile", cache_key, result, ds.content_hash or "")
         return ProfileResult(**result)
     except HTTPException:

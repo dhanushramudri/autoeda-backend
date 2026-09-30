@@ -49,10 +49,14 @@ def list_datasets(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    from sqlalchemy import or_
+
     _assert_member(workspace_id, current_user, db)
     return (
         db.query(Dataset)
         .filter(dataset_visibility_filter(db, workspace_id))
+        # hide the hidden working tables created by Data Science Flow runs
+        .filter(or_(Dataset.source_config.is_(None), Dataset.source_config.notlike('%"ds_flow_run"%')))
         .order_by(Dataset.created_at.desc())
         .all()
     )

@@ -33,7 +33,7 @@ NEEDS = {
     "hypotheses": ["work", "excluded", "uni"],
     "features": ["work", "excluded", "uni"],
     "select": ["work", "X", "uni"],
-    "models": ["work", "X", "selected", "train_idx", "test_idx"],
+    "models": ["work", "X", "selected", "train_idx", "test_idx", "uni"],
     "explain": ["work", "X", "selected", "test_idx", "model_train", "model_final", "prob"],
     "value": ["work", "prob", "test_idx", "p_hold_cal", "drivers"],
     "validate": ["work", "selected", "excluded", "split_kind", "test_idx", "p_hold_cal"],
@@ -73,6 +73,23 @@ def unique_table_names(datasets) -> dict[int, str]:
         seen[n] = d.id
         out[d.id] = n
     return out
+
+
+def _refresh_working_dataset(db, run, params: dict, roles: dict, art: dict, drop: set) -> None:
+    """Save (or update) the cleaned modelling table as a hidden dataset so the AutoEDA pages can show it.
+    Never fatal: the flow itself doesn't depend on it."""
+    try:
+        from .working import build_working_frame, upsert_working_dataset
+
+        frame = build_working_frame(art["work"], roles, art["excluded"], art["uni"], drop)
+        wid = upsert_working_dataset(db, run, frame, params.get("working_dataset_id"))
+        params["working_dataset_id"] = wid
+        run.params_json = json.dumps(params)
+        db.add(run)
+        db.commit()
+    except Exception:
+        logger.exception("DS flow %s: could not save the working dataset", run.id)
+        db.rollback()
 
 
 def execute_run(run_id: int) -> None:
@@ -154,10 +171,15 @@ def execute_run(run_id: int) -> None:
                 else:
                     for k, v in new_art.items():
                         (outputs if k in HEAVY_ART else art)[k] = v
+                    if key == "leakage":
+                        _refresh_working_dataset(db, run, params, roles, art, drop=set())
                     if key == "understand":
                         merged = None  # the working table now lives in `art`; don't hold a second copy in the server process
                     if key == "models":
                         apply_quarantine(results)
+                        q = {x["feature"] for x in (res.get("quarantined") or [])}
+                        if q:
+                            _refresh_working_dataset(db, run, params, roles, art, drop=q)
                     # free everything no later stage reads
                     order = [k for k, _t, _f, _n in _all_stages()]
                     later = set()

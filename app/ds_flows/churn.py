@@ -394,6 +394,49 @@ def stage_eda(ctx):
             "median_churned": float(vl[L["__y"] == 1].median()),
         }
 
+    # ---- EDA visuals for the strongest drivers: distributions by outcome, correlations, outliers, column profile ----
+    drv = [r.feature for r in uni.itertuples() if r.feature not in excluded and r.feature in feats.columns][:12]
+    if drv:
+        Lf = feats.loc[L.index, drv]
+        yl = L["__y"].to_numpy()
+        dist = []
+        for c in drv[:6]:
+            v = Lf[c].to_numpy(dtype=float)
+            m = ~np.isnan(v)
+            if m.sum() < 50:
+                continue
+            lo, hi = np.nanpercentile(v[m], [1, 99])
+            if lo == hi:
+                continue
+            edges = np.linspace(lo, hi, 21)
+            h0, _ = np.histogram(np.clip(v[m & (yl == 0)], lo, hi), bins=edges)
+            h1, _ = np.histogram(np.clip(v[m & (yl == 1)], lo, hi), bins=edges)
+            n0, n1 = max(int(h0.sum()), 1), max(int(h1.sum()), 1)
+            dist.append({"feature": c, "bins": [{"x": float((edges[i] + edges[i + 1]) / 2), "retained": float(h0[i] / n0), "churned": float(h1[i] / n1)} for i in range(20)]})
+        out["distributions"] = dist
+
+        cs = Lf.copy()
+        cs["__churned"] = yl
+        if len(cs) > 20_000:
+            cs = cs.sample(20_000, random_state=SEED)
+        corr = cs.corr(method="spearman")
+        out["correlation"] = {"features": list(corr.columns), "matrix": [[None if pd.isna(x) else float(x) for x in row] for row in corr.to_numpy()]}
+
+        outl, prof = [], []
+        for c in drv:
+            v = Lf[c].dropna()
+            if len(v) < 50:
+                continue
+            q1, q3 = v.quantile([0.25, 0.75])
+            iqr = q3 - q1
+            if iqr > 0:
+                outl.append({"feature": c, "outlier_pct": float(((v < q1 - 1.5 * iqr) | (v > q3 + 1.5 * iqr)).mean()),
+                             "lower": float(q1 - 1.5 * iqr), "upper": float(q3 + 1.5 * iqr)})
+            prof.append({"feature": c, "missing_pct": float(Lf[c].isna().mean() * 100), "mean": float(v.mean()), "std": float(v.std()),
+                         "min": float(v.min()), "max": float(v.max()), "skew": float(v.skew()) if len(v) > 2 else None})
+        out["outliers"] = outl
+        out["profile"] = prof
+
     out["missing_overall_pct"] = round(float(work.drop(columns=list(META)).isna().mean().mean() * 100), 2)
     return clean(out), {}
 
