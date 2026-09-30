@@ -378,7 +378,7 @@ def plan_workspace(tables: dict[str, pd.DataFrame], meta: dict[str, dict] | None
         f.pop("table", None)
     return clean({
         "tables": rows, "link_key": link["name"] if link else None, "base_table": base_name,
-        "label": ({"column": spec["column"], "kind": spec["kind"], "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"]} if spec else None),
+        "label": ({"column": spec["column"], "kind": spec["kind"], "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"], "counts": {"churned": pos, "retained": neg, "open": unk}} if spec else None),
         "flows": flow_list, "runnable": bool(spec),
         "reason": None if spec else "No churn outcome was found in this workspace's datasets.",
     })
