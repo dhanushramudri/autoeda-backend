@@ -20,6 +20,7 @@ BY ENTITY (held-out accounts are never seen in training).
 from __future__ import annotations
 
 import io
+import os
 import re
 import time
 import warnings
@@ -37,7 +38,8 @@ warnings.filterwarnings("ignore")
 
 SEED = 42
 META = ("__y", "__date", "__entity", "__row")
-MAX_TRAIN_ROWS = 100_000
+# Training rows are sampled by account above this. Lower it on small servers (env DS_FLOW_MAX_TRAIN_ROWS).
+MAX_TRAIN_ROWS = int(os.environ.get("DS_FLOW_MAX_TRAIN_ROWS", 100_000))
 
 _LEAK_NAME = re.compile(r"(^|_)(future|next|post|after|forward|outcome|churned|cancel|cancelled|canceled|lost|renewed|retained)(_|$)", re.I)
 _ID_LIKE = re.compile(r"(_id|^id|_ref|_key|_uuid)$", re.I)
@@ -529,7 +531,7 @@ def stage_features(ctx):
         X["snapshots_seen"] = work.loc[order].groupby("__entity").cumcount().reindex(X.index) + 1.0
         created.append({"feature": "snapshots_seen", "kind": "trajectory", "note": "number of snapshots observed for the account so far"})
 
-    X = X.replace([np.inf, -np.inf], np.nan)
+    X = X.replace([np.inf, -np.inf], np.nan).astype(np.float32)  # half the memory of float64; models read float32 anyway
     result = {
         "base_features": len(base_cols), "total_features": int(X.shape[1]), "created": created[:40], "created_count": len(created),
         "kinds": {k: int(sum(1 for c in created if c["kind"] == k)) for k in {c["kind"] for c in created}},
@@ -668,7 +670,7 @@ def _make_models(n_train: int) -> dict:
         ]),
         "Random Forest": lambda: Pipeline([
             ("imp", SimpleImputer(strategy="median", keep_empty_features=True)),
-            ("m", RandomForestClassifier(n_estimators=trees, min_samples_leaf=5, max_features="sqrt", max_depth=14,
+            ("m", RandomForestClassifier(n_estimators=trees, min_samples_leaf=10 if n_train > 40_000 else 5, max_features="sqrt", max_depth=12,
                                          class_weight="balanced_subsample", n_jobs=4, random_state=SEED)),
         ]),
         "Gradient Boosting": lambda: HistGradientBoostingClassifier(
@@ -821,7 +823,8 @@ def stage_models(ctx):
     prob = pd.Series(iso.predict(score.to_numpy()), index=X.index)
 
     buf = io.BytesIO()
-    joblib.dump({"model": final, "features": list(X.columns), "calibrator": iso, "threshold": thr, "name": best}, buf)
+    joblib.dump({"model": final, "features": list(X.columns), "calibrator": iso, "threshold": thr, "name": best}, buf, compress=3)
+    model_bytes = buf.getvalue() if buf.tell() <= 60 * 1024 * 1024 else None  # a huge blob is not worth storing in the database
 
     result = {
         "leaderboard": board, "selected_model": best, "selection_metric": "cross-validated PR-AUC",
@@ -831,7 +834,7 @@ def stage_models(ctx):
     }
     art = {
         "prob": prob, "score_type": score_type, "model_final": final, "model_train": fitted[best], "best": best,
-        "iso": iso, "threshold": thr, "model_bytes": buf.getvalue(), "p_hold_cal": pd.Series(p_hold_cal, index=te),
+        "iso": iso, "threshold": thr, "model_bytes": model_bytes, "p_hold_cal": pd.Series(p_hold_cal, index=te),
         "selected": sel,
     }
     return clean(result), art

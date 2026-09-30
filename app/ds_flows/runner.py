@@ -22,6 +22,23 @@ logger = logging.getLogger("autoeda.ds_flows.runner")
 # A stage failing here aborts the run (nothing downstream can work without it); the others degrade gracefully.
 CRITICAL = {"discover", "understand", "leakage", "features", "select", "models", "value", "build"}
 HEAVY_ART = {"model_bytes", "enriched_csv", "accounts_csv", "dictionary_csv"}
+# Artifacts each stage actually reads. Only these are sent to the worker process, and anything no later stage
+# needs is dropped from memory (the feature matrix and trained models are hundreds of MB and were the cause of
+# out-of-memory worker crashes on a small server when every stage received everything).
+NEEDS = {
+    "discover": [],
+    "understand": [],
+    "leakage": ["work"],
+    "eda": ["work", "excluded", "uni"],
+    "hypotheses": ["work", "excluded", "uni"],
+    "features": ["work", "excluded", "uni"],
+    "select": ["work", "X", "uni"],
+    "models": ["work", "X", "selected", "train_idx", "test_idx"],
+    "explain": ["work", "X", "selected", "test_idx", "model_train", "model_final", "prob"],
+    "value": ["work", "prob", "test_idx", "p_hold_cal", "drivers"],
+    "validate": ["work", "selected", "excluded", "split_kind", "test_idx", "p_hold_cal"],
+    "build": ["work", "prob", "tiers", "acct", "drivers", "score_type", "threshold", "best"],
+}
 STAGE_TIMEOUT = {"discover": 600, "models": 1800, "explain": 600, "hypotheses": 600}
 DEFAULT_TIMEOUT = 600
 
@@ -117,7 +134,7 @@ def execute_run(run_id: int) -> None:
                 ctx = {
                     "df": (base_df if key == "build" else merged) if needs_df else None,
                     "roles": roles, "params": params, "results": results,
-                    "art": {k: v for k, v in art.items() if k not in HEAVY_ART},
+                    "art": {k: art[k] for k in NEEDS.get(key, []) if k in art},
                 }
             try:
                 res, new_art = run_isolated(fn, ctx, timeout=STAGE_TIMEOUT.get(key, DEFAULT_TIMEOUT))
@@ -137,8 +154,17 @@ def execute_run(run_id: int) -> None:
                 else:
                     for k, v in new_art.items():
                         (outputs if k in HEAVY_ART else art)[k] = v
+                    if key == "understand":
+                        merged = None  # the working table now lives in `art`; don't hold a second copy in the server process
                     if key == "models":
                         apply_quarantine(results)
+                    # free everything no later stage reads
+                    order = [k for k, _t, _f, _n in _all_stages()]
+                    later = set()
+                    for k in order[order.index(key) + 1:]:
+                        later.update(NEEDS.get(k, []))
+                    for k in [k for k in art if k not in later]:
+                        del art[k]
                 st["summary"], st["logs"] = stage_summary(key, res)
                 st["status"] = "done"
             except (AnalysisTimeout, AnalysisCrashed) as e:
