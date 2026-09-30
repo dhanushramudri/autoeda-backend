@@ -193,3 +193,28 @@ def prepare_dates(df: pd.DataFrame, date_col: str | None) -> pd.Series | None:
         return None
     d = parse_time_column(df[date_col])
     return d if d.notna().mean() >= 0.5 else None
+
+
+_SUFFIXES = [("__missing", " (missing)"), ("__delta_prev", " (change vs previous)"), ("__days_before_period", " (days before period)"),
+             ("__days_since_last", " (days since last)"), ("__events_last_90d", " (events, last 90 days)"), ("__n_events", " (number of events)")]
+
+
+def _titled(s: str) -> str:
+    txt = ": ".join(p.replace("_", " ") for p in s.split("__") if p)
+    return (txt[:1].upper() + txt[1:]) if txt else s
+
+
+def pretty_feature(f: str) -> str:
+    """Readable name for an engineered / raw feature (used in the UI, narrative and report)."""
+    s = str(f)
+    if "=" in s and not s.endswith("__missing"):
+        a, b = s.split("=", 1)
+        return f"{pretty_feature(a)}: {b.strip() or '(blank)'}"
+    for suf, txt in _SUFFIXES:
+        if s.endswith(suf):
+            return pretty_feature(s[: -len(suf)]) + txt
+    if s.endswith("__yes__avg"):
+        return _titled(s[:-10]) + " (share yes)"
+    if s.endswith("__avg"):
+        return _titled(s[:-5]) + " (average)"
+    return _titled(s)

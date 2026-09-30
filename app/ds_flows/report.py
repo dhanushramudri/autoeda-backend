@@ -12,6 +12,8 @@ import logging
 import re
 from typing import Any
 
+from .common import pretty_feature
+
 logger = logging.getLogger("autoeda.ds_flows.report")
 
 
@@ -31,7 +33,7 @@ def fmt_num(x: float | None, pct: bool = False, digits: int = 1) -> str:
 
 
 def _label(f: str) -> str:
-    return f.replace("__", " · ").replace("_", " ")
+    return pretty_feature(f)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +115,23 @@ def stage_summary(key: str, r: dict) -> tuple[str, list[str]]:
 # headline
 # ---------------------------------------------------------------------------
 
+def apply_quarantine(results: dict) -> None:
+    """Features quarantined by the model stage must not still be presented as findings elsewhere."""
+    q = {x["feature"] for x in (results.get("models") or {}).get("quarantined", [])}
+    if not q:
+        return
+    hy = results.get("hypotheses")
+    if hy:
+        for h in hy["hypotheses"]:
+            if h.get("feature") in q:
+                h["verdict"] = "quarantined"
+                h["note"] = "feature quarantined as likely recorded at or after the decision"
+        hy["supported"] = sum(h["verdict"] == "supported" for h in hy["hypotheses"])
+    eda = results.get("eda")
+    if eda and eda.get("driver_bins"):
+        eda["driver_bins"] = [d for d in eda["driver_bins"] if d["feature"] not in q]
+
+
 def build_headline(results: dict) -> dict:
     u, m, v = results.get("understand"), results.get("models"), results.get("value")
     ex, val, lk = results.get("explain"), results.get("validate"), results.get("leakage")
@@ -125,7 +144,7 @@ def build_headline(results: dict) -> dict:
                  recall_top10=ho["recall_top10"], precision_at_threshold=m["operating_point"]["precision"], recall_at_threshold=m["operating_point"]["recall"])
     if v:
         hi = next((t for t in v["tiers"] if t["tier"] == "High"), None)
-        h.update(value_column=v.get("value_column"), total_value=v.get("total_value"), expected_loss_total=v.get("expected_loss_total"),
+        h.update(population=v.get("population"), value_column=v.get("value_column"), total_value=v.get("total_value"), expected_loss_total=v.get("expected_loss_total"),
                  high_risk_accounts=hi["accounts"] if hi else None, high_risk_value=hi.get("value") if hi else None,
                  high_risk_expected_loss=hi.get("expected_loss") if hi else None, accounts_scored=v["accounts_scored"], as_of=v.get("as_of"))
     if ex:
@@ -162,29 +181,30 @@ _ACTION_RULES = [
 ]
 
 
-def _action_for(feature: str) -> str:
+def _action_for(feature: str) -> str | None:
     for rx, act in _ACTION_RULES:
         if re.search(rx, feature, re.I):
             return act
-    return "Investigate this signal with the account owner and add it to the account health review."
+    return None
 
 
 def _template_narrative(h: dict, hyps: list[dict]) -> dict:
     parts = []
-    if h.get("churn_rate") is not None:
-        parts.append(f"Across {h['accounts']:,} accounts ({h['rows']:,} rows), {fmt_num(h['churn_rate'], pct=True)} of observations churned.")
-    if h.get("model"):
-        parts.append(f"A {h['model']} model identifies churn risk on accounts it has never seen with a ROC-AUC of {h['roc_auc']:.2f}; "
-                     f"the riskiest 10% of accounts churn {h['lift_top10']:.1f}× more often than average and contain {fmt_num(h['recall_top10'], pct=True, digits=0)} of all churners.")
+    pop = h.get("population") or "accounts"
     if h.get("high_risk_accounts") is not None and h.get("expected_loss_total") is not None:
-        parts.append(f"{h['high_risk_accounts']} accounts are in the High risk tier, holding {fmt_num(h['high_risk_value'])} of {h['value_column']}; "
-                     f"the probability-weighted {h['value_column']} at risk across all {h['accounts_scored']:,} accounts is {fmt_num(h['expected_loss_total'])}.")
+        parts.append(f"{h['accounts_scored']:,} {pop} scored. {h['high_risk_accounts']:,} are high risk, holding {fmt_num(h['high_risk_value'])} {h['value_column']}, "
+                     f"of which {fmt_num(h['high_risk_expected_loss'])} is expected to be lost. Expected loss across all {pop}: {fmt_num(h['expected_loss_total'])}.")
+    elif h.get("accounts_scored") is not None:
+        parts.append(f"{h['accounts_scored']:,} {pop} scored; {h.get('high_risk_accounts') or 0:,} are high risk.")
+    if h.get("model"):
+        parts.append(f"{h['model']}: AUC {h['roc_auc']:.2f} on accounts it never saw. The riskiest 10% churn at {h['lift_top10']:.1f}x the average rate "
+                     f"and contain {h['recall_top10'] * 100:.0f}% of all churners.")
     if h.get("top_drivers"):
-        parts.append("The strongest drivers are " + ", ".join(_label(d["feature"]) for d in h["top_drivers"][:3]) + ".")
+        parts.append("Top drivers: " + "; ".join(_label(d["feature"]) + f" ({d['direction']})" for d in h["top_drivers"][:3]) + ".")
     seen, actions = set(), []
     for d in h.get("top_drivers", []):
         act = _action_for(d["feature"])
-        if act in seen:
+        if act is None or act in seen:
             continue
         seen.add(act)
         actions.append({"driver": _label(d["feature"]), "action": act})
@@ -253,15 +273,15 @@ def _llm_narrative(h: dict, hyps: list[dict], tiers: list[dict]) -> dict | None:
 def build_narrative(results: dict, headline: dict) -> dict:
     hyps = (results.get("hypotheses") or {}).get("hypotheses", [])
     tiers = (results.get("value") or {}).get("tiers", [])
-    nar = _llm_narrative(headline, hyps, tiers) or _template_narrative(headline, hyps)
+    nar = _template_narrative(headline, hyps)
     caveats = []
     if headline.get("label_warning"):
         caveats.append("Label check: " + headline["label_warning"])
     if headline.get("leakage_excluded"):
-        caveats.append("Excluded as outcome-leaking: " + ", ".join(headline["leakage_excluded"]) + ".")
+        caveats.append("Excluded, leaks the outcome: " + ", ".join(headline["leakage_excluded"]) + ".")
     if headline.get("quarantined"):
-        caveats.append(f"Quarantined as likely recorded at or after the decision (the first model reached AUC {headline['suspicious_auc']:.2f}, "
-                       "which is implausible for churn): " + ", ".join(headline["quarantined"]) + ". Confirm with the data owner whether these are known before the renewal.")
+        caveats.append(f"Removed as implausibly predictive (first model AUC {headline['suspicious_auc']:.2f}): " + ", ".join(headline["quarantined"])
+                       + ". Confirm they are known before the renewal.")
     nar["caveats"] = caveats
     return nar
 
@@ -299,11 +319,11 @@ def build_markdown(run_title: str, dataset_name: str, results: dict, headline: d
     lk = results.get("leakage")
     if lk:
         rows = [[e["feature"], e["reason"]] for e in lk["excluded"]] or [["—", "No leaking columns found"]]
-        md.append(f"## Data leakage safeguards\n\nColumns that contain information from after the outcome would make the model look perfect and fail in production. They were found automatically and excluded.\n\n{_table(['Column', 'Why it was excluded'], rows)}")
+        md.append(f"## Data leakage safeguards\n\n{_table(['Column', 'Why it was excluded'], rows)}")
 
     hy = results.get("hypotheses")
     if hy:
-        rows = [[x["statement"], x["verdict"], x["effect_label"], _q(x['q_value'])] for x in hy["hypotheses"][:8]]
+        rows = [[x["statement"], x["verdict"], x["effect_label"], _q(x['q_value'])] for x in hy["hypotheses"] if x["verdict"] != "quarantined"][:8]
         md.append(f"## What drives churn\n\n{_table(['Hypothesis', 'Verdict', 'Effect size', 'q-value'], rows)}\n\nTested on {hy['tested_on_rows']:,} rows with {hy['correction']}.")
 
     m = results.get("models")
@@ -330,10 +350,9 @@ def build_markdown(run_title: str, dataset_name: str, results: dict, headline: d
     b = results.get("build")
     if b:
         rows = [[d["column"], d["description"]] for d in b["dictionary"]]
-        md.append(f"## Deliverables and how to use them\n\nThe enriched file keeps every original row and column, in the original order, and appends the columns below. Load it into any BI, SQL or natural-language tool; filter ds_is_current_row = 1 for one row per account.\n\n{_table(['Added column', 'Meaning'], rows)}")
+        md.append(f"## Added columns\n\nOriginal rows and columns are unchanged. Filter ds_is_current_row = 1 for one row per account.\n\n{_table(['Added column', 'Meaning'], rows)}")
 
-    md.append("## Assumptions and limitations\n\n- Probabilities are calibrated on the training data's churn rate; if the business mix changes, re-run the flow.\n"
-              "- Expected value at risk is probability × current value; it is not a forecast of lost revenue timing.\n"
-              "- Drivers are associations found in the data, not proof of cause; test interventions before scaling them.\n"
-              "- Hypothesis tests use one row per account so repeated snapshots do not inflate significance; p-values are corrected for multiple testing (Benjamini-Hochberg).")
+    md.append("## Notes\n\n- Expected loss = churn probability x the value column; it does not say when revenue is lost.\n"
+              "- Drivers are associations, not proof of cause.\n"
+              "- Hypothesis tests use one row per account; p-values are corrected for multiple testing (Benjamini-Hochberg).")
     return "\n\n".join(md) + "\n"

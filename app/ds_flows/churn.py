@@ -31,7 +31,7 @@ import pandas as pd
 from scipy import stats
 
 from ..eda.ts_columns import parse_time_column
-from .common import clean, encode_target
+from .common import clean, encode_target, pretty_feature
 
 warnings.filterwarnings("ignore")
 
@@ -199,7 +199,7 @@ def stage_leakage(ctx):
     y = work.loc[lab, "__y"].to_numpy()
 
     feats = _feature_frame(work, structural)
-    excluded: dict[str, str] = {c: "user-excluded" for c in (ctx["params"].get("exclude_columns") or []) if c in work.columns}
+    excluded: dict[str, str] = {c: "this is the outcome itself — it was used to build the churn label" for c in (ctx["params"].get("exclude_columns") or []) if c in work.columns}
     warns: list[dict] = []
 
     # (a) names that describe the future / the outcome itself
@@ -295,7 +295,7 @@ def stage_leakage(ctx):
 
     result = {
         "candidate_features": int(feats.shape[1]), "categorical_checked": cat_checked,
-        "excluded": [{"feature": k, "reason": v} for k, v in excluded.items()],
+        "excluded": [{"feature": k, "reason": v} for k, v in excluded.items() if not v.startswith("this is the outcome")],
         "warnings": warns[:12],
         "top_univariate": uni.head(25).to_dict(orient="records"),
     }
@@ -328,7 +328,7 @@ def stage_eda(ctx):
 
     if work["__date"].notna().any():
         t = L.groupby("__date")["__y"].agg(["size", "mean"]).reset_index()
-        out["churn_by_date"] = [{"date": d, "n": int(n), "rate": float(m)} for d, n, m in t.itertuples(index=False)]
+        out["churn_by_date"] = [{"date": d, "n": int(n), "rate": float(m)} for d, n, m in t.itertuples(index=False) if n >= 30]
 
     # churn rate by segment-like dimensions (one-hot groups + low-cardinality text columns)
     seg = []
@@ -345,7 +345,7 @@ def stage_eda(ctx):
         if (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)) and 2 <= s.nunique() <= 12:
             for g, sub in L.groupby(c):
                 if len(sub) >= 30:
-                    seg.append({"dimension": str(c), "group": str(g), "n": int(len(sub)), "churn_rate": float(sub["__y"].mean())})
+                    seg.append({"dimension": str(c), "group": (str(g) if str(g).strip() else "(blank)"), "n": int(len(sub)), "churn_rate": float(sub["__y"].mean())})
     for s_ in seg:
         s_["lift"] = s_["churn_rate"] / base if base else None
     out["segments"] = sorted(seg, key=lambda d: -abs((d["lift"] or 1) - 1))[:24]
@@ -393,7 +393,7 @@ def stage_eda(ctx):
 # ---------------------------------------------------------------------------
 
 def _human(feature: str) -> str:
-    return feature.replace("_", " ")
+    return pretty_feature(feature)
 
 
 def stage_hypotheses(ctx):
@@ -464,10 +464,10 @@ def stage_hypotheses(ctx):
     q = _bh([h["p_value"] for h in hyps])
     for h, qv in zip(hyps, q):
         h["q_value"] = qv
-        if qv < 0.05 and h["effect"] >= 0.08:
+        if qv < 0.05 and h["effect"] >= 0.15:
             h["verdict"] = "supported"
         elif qv < 0.05:
-            h["verdict"] = "supported"  # significant, small effect — flagged by effect size column
+            h["verdict"] = "weak"  # statistically significant, but the effect is too small to matter
             h["note"] = "statistically significant but small effect"
         elif h["n"] >= 400 and h["effect"] < 0.05:
             h["verdict"] = "refuted"
@@ -696,9 +696,6 @@ def _run_candidates(Xtr, ytr, Xte, yte, makers, folds, started, budget):
     board.append({"model": "Baseline (prevalence)", "baseline": True, "cv": None,
                   "holdout": _metrics(yte, base_p + np.random.RandomState(0).rand(len(yte)) * 1e-9), "train_seconds": 0.0})
     for name, mk in makers.items():
-        if time.time() - started > budget and oof_store:
-            board.append({"model": name, "skipped": "time budget reached"})
-            continue
         t0 = time.time()
         try:
             oof = np.zeros(len(ytr))
@@ -1080,18 +1077,18 @@ def stage_validate(ctx):
 
     leaked = [c for c in sel if c in excluded]
     add("No outcome-leaking features in the model", "pass" if not leaked else "fail",
-        f"{len(excluded)} column(s) excluded by the leakage audit; none used." if not leaked else f"Used excluded: {leaked}")
+        f"{sum(1 for v in excluded.values() if not v.startswith('this is the outcome'))} column(s) excluded as leaking the outcome; none used." if not leaked else f"Used excluded: {leaked}")
     add("Evaluated on unseen accounts", "pass", f"Holdout split is {ctx['art']['split_kind']}; train/test never share an account.")
     gap = abs((cv["roc_auc"] or 0) - (ho["roc_auc"] or 0))
     add("Cross-validation agrees with holdout", "pass" if gap < 0.05 else "warn", f"CV AUC {cv['roc_auc']:.3f} vs holdout {ho['roc_auc']:.3f} (gap {gap:.3f}).")
     q = m.get("quarantined") or []
     if q:
-        add("Not suspiciously perfect", "warn",
-            f"The first model reached AUC {q[0]['auc_with']:.2f}, which is implausible for churn. Quarantined and retrained without: "
-            + ", ".join(x["feature"] for x in q) + f". Reported results exclude them — confirm with the data owner whether they are known before the renewal decision.")
+        add("Accuracy is plausible", "warn",
+            f"First model reached AUC {q[0]['auc_with']:.2f} (implausible for churn). Retrained without " + ", ".join(x["feature"] for x in q)
+            + ". Confirm with the data owner that these are known before the renewal.")
     else:
-        add("Not suspiciously perfect", "pass" if (ho["roc_auc"] or 0) <= SUSPICIOUS_AUC else "warn",
-            f"Holdout AUC {ho['roc_auc']:.3f} is in a plausible range." if (ho["roc_auc"] or 0) <= SUSPICIOUS_AUC else f"Holdout AUC {ho['roc_auc']:.3f} is still very high — verify no feature leaks the outcome.")
+        add("Accuracy is plausible", "pass" if (ho["roc_auc"] or 0) <= SUSPICIOUS_AUC else "warn",
+            f"Holdout AUC {ho['roc_auc']:.3f}." if (ho["roc_auc"] or 0) <= SUSPICIOUS_AUC else f"Holdout AUC {ho['roc_auc']:.3f} is very high - verify no feature leaks the outcome.")
     add("Beats the naive baseline", "pass" if (ho["pr_auc"] or 0) > 1.5 * base else "warn",
         f"PR-AUC {ho['pr_auc']:.3f} vs {base:.3f} for predicting the average rate.")
     add("Useful top-decile lift", "pass" if (ho["lift_top10"] or 0) >= 2 else ("warn" if (ho["lift_top10"] or 0) >= 1.3 else "fail"),
@@ -1177,8 +1174,8 @@ def stage_build(ctx):
         dict_rows.append({"column": cn, "type": dtype, "description": desc, "values": values or ""})
 
     add("ds_churn_probability", prob.round(4), "float 0-1",
-        "Calibrated probability that the account churns (the label 'target' in the source data). Higher = riskier.")
-    add("ds_churn_risk_tier", tiers, "text", "Risk bucket from the probability: High = top 10% of accounts at the latest snapshot, Medium = next 20%, Low = the rest.", "High | Medium | Low")
+        f"Calibrated probability that the account churns (outcome '{ctx['params'].get('label_column') or 'churn label'}'). Higher = riskier.")
+    add("ds_churn_risk_tier", tiers, "text", "Risk bucket from the probability: High = top 10% of the live population (open renewals, or each account's latest record when none are open), Medium = next 20%, Low = the rest.", "High | Medium | Low")
     if work["__date"].notna().any():
         pct = prob.groupby(work["__date"]).rank(pct=True) * 100
     else:
@@ -1198,7 +1195,7 @@ def stage_build(ctx):
     add("ds_is_current_row", latest, "int 0/1",
         "1 for the row to act on: the account's open (unresolved) record, or its latest row when nothing is open. Filter on this for one row per account.", "0 | 1")
     acct_tier = work["__entity"].map(acct.set_index("entity")["tier"].to_dict()) if len(acct) else pd.Series("", index=work.index)
-    add("ds_account_risk_tier", acct_tier.fillna(""), "text", "Risk tier of the account's latest snapshot, repeated on every row of that account.", "High | Medium | Low")
+    add("ds_account_risk_tier", acct_tier.fillna(""), "text", "Risk tier of the account's current row (its open renewal, or latest record), repeated on every row of that account. Blank for accounts with no current row.", "High | Medium | Low")
     add("ds_model", pd.Series(f"{best} (AutoEDA churn flow)", index=work.index), "text", "Model that produced the scores.")
 
     enriched = pd.concat([out, pd.DataFrame(cols, index=out.index)], axis=1)

@@ -63,7 +63,7 @@ def execute_run(run_id: int) -> None:
     from ..models.dataset import Dataset
     from ..models.ds_flow import DsFlowRun
     from ..routers.eda import _load_df
-    from .report import build_headline, build_markdown, build_narrative, stage_summary
+    from .report import apply_quarantine, build_headline, build_markdown, build_narrative, stage_summary
 
     db = SessionLocal()
     try:
@@ -125,7 +125,7 @@ def execute_run(run_id: int) -> None:
                 if key == "discover":
                     merged, base_df = new_art["merged"], new_art["base"]
                     roles = res["roles"]
-                    params = {**params, "exclude_columns": res["exclude_columns"]}
+                    params = {**params, "exclude_columns": res["exclude_columns"], "label_column": res["label"]["column"]}
                     base_ds = by_name.get(res["base_table"])
                     if base_ds is not None:
                         run.dataset_id = base_ds.id
@@ -137,6 +137,8 @@ def execute_run(run_id: int) -> None:
                 else:
                     for k, v in new_art.items():
                         (outputs if k in HEAVY_ART else art)[k] = v
+                    if key == "models":
+                        apply_quarantine(results)
                 st["summary"], st["logs"] = stage_summary(key, res)
                 st["status"] = "done"
             except (AnalysisTimeout, AnalysisCrashed) as e:
