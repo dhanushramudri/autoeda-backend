@@ -295,7 +295,37 @@ def stage_leakage(ctx):
         elif v >= 0.45:
             warns.append({"feature": c, "note": f"very strong association with the outcome (Cramér's V {v:.2f}) — verify it is known before the outcome"})
 
+    # (f) joint check: a quick model on everything left. If it is implausibly accurate, the most decisive feature is
+    # removed (repeatedly) — so the working table, Auto EDA and every page downstream never see the suspect columns.
+    probe = None
+    try:
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        from sklearn.metrics import roc_auc_score
+
+        tr_idx, te_idx, _kind = _split(work)
+        cols = [r.feature for r in uni.itertuples() if r.feature not in excluded and r.feature in feats.columns][:60]
+        if len(cols) >= 12:
+            ytr_, yte_ = work.loc[tr_idx, "__y"].to_numpy(), work.loc[te_idx, "__y"].to_numpy()
+            removed, first_auc = [], None
+            for _ in range(MAX_QUARANTINE):
+                mdl = HistGradientBoostingClassifier(max_iter=80, learning_rate=0.1, early_stopping=False, random_state=SEED)
+                mdl.fit(feats.loc[tr_idx, cols], ytr_)
+                auc_ = float(roc_auc_score(yte_, mdl.predict_proba(feats.loc[te_idx, cols])[:, 1]))
+                first_auc = auc_ if first_auc is None else first_auc
+                if auc_ <= SUSPICIOUS_AUC or len(cols) <= 12:
+                    break
+                culprit, cost = _top_culprit(mdl, feats.loc[te_idx, cols], yte_, cols)
+                removed.append({"feature": culprit, "auc_with": auc_, "auc_cost": cost})
+                cols.remove(culprit)
+                excluded[culprit] = (f"implausibly predictive (a model using it reached AUC {auc_:.2f}; shuffling it costs {cost:.2f}) "
+                                     "— likely recorded at or after the decision")
+            if removed:
+                probe = {"auc_with": first_auc, "removed": removed}
+    except Exception:
+        probe = None
+
     result = {
+        "probe": probe,
         "candidate_features": int(feats.shape[1]), "categorical_checked": cat_checked,
         "excluded": [{"feature": k, "reason": v} for k, v in excluded.items() if not v.startswith("this is the outcome")],
         "warnings": warns[:12],
@@ -1143,7 +1173,10 @@ def stage_validate(ctx):
     add("Evaluated on unseen accounts", "pass", f"Holdout split is {ctx['art']['split_kind']}; train/test never share an account.")
     gap = abs((cv["roc_auc"] or 0) - (ho["roc_auc"] or 0))
     add("Cross-validation agrees with holdout", "pass" if gap < 0.05 else "warn", f"CV AUC {cv['roc_auc']:.3f} vs holdout {ho['roc_auc']:.3f} (gap {gap:.3f}).")
-    q = m.get("quarantined") or []
+    q = list(m.get("quarantined") or [])
+    probe = (ctx["results"].get("leakage") or {}).get("probe")
+    if probe:
+        q = [{"feature": x["feature"], "auc_with": probe["auc_with"]} for x in probe["removed"]] + q
     if q:
         add("Accuracy is plausible", "warn",
             f"First model reached AUC {q[0]['auc_with']:.2f} (implausible for churn). Retrained without " + ", ".join(x["feature"] for x in q)

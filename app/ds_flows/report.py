@@ -161,10 +161,12 @@ def build_headline(results: dict) -> dict:
         warn = next((c for c in val["checks"] if c["check"] == "Label behaves like churn" and c["status"] != "pass"), None)
         h["label_warning"] = warn["detail"] if warn else None
     if lk:
-        h["leakage_excluded"] = [e["feature"] for e in lk["excluded"]]
-    if m and m.get("quarantined"):
-        h["quarantined"] = [q["feature"] for q in m["quarantined"]]
-        h["suspicious_auc"] = m["quarantined"][0]["auc_with"]
+        h["leakage_excluded"] = [e["feature"] for e in lk["excluded"] if not e["reason"].startswith("implausibly")]
+    probe = (lk or {}).get("probe")
+    qs = ([(x["feature"], probe["auc_with"]) for x in probe["removed"]] if probe else []) + [(q["feature"], q["auc_with"]) for q in ((m or {}).get("quarantined") or [])]
+    if qs:
+        h["quarantined"] = [f for f, _a in qs]
+        h["suspicious_auc"] = qs[0][1]
     d = results.get("discover")
     if d:
         h["data_used"] = {"base_table": d["base_table"], "linked": [a["table"] for a in d.get("attached", [])],

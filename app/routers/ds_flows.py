@@ -26,7 +26,7 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/ds-flows", tags=["ds-flows
 
 # Each stage persists progress when it starts and ends, and the slowest (model training) is allowed 20 min,
 # so a run with no update for longer than this is presumed dead (server restart / crash).
-STALE_AFTER = timedelta(minutes=25)
+STALE_AFTER = timedelta(minutes=60)
 ACTIVE = ("pending", "running")
 
 
@@ -70,7 +70,7 @@ def _reap_if_stale(run: DsFlowRun, db: Session) -> DsFlowRun:
     updated = run.updated_at if run.updated_at.tzinfo else run.updated_at.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) - updated > STALE_AFTER:
         run.status = "error"
-        run.error = "This run stalled — no progress for over 25 minutes, likely because the server restarted. Please start it again."
+        run.error = "This run stalled — no progress for over 60 minutes, likely because the server restarted. Please start it again."
         if run.stages_json:
             stages = json.loads(run.stages_json)
             for s in stages:
@@ -109,6 +109,7 @@ def _full(run: DsFlowRun) -> dict:
         },
         "source_filename": run.source_filename,
         "working_dataset_id": (_j(run.params_json) or {}).get("working_dataset_id"),
+        "auto_eda_run_id": (_j(run.params_json) or {}).get("auto_eda_run_id"),
     }
 
 
@@ -221,6 +222,13 @@ def get_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), curre
 def delete_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
     _assert_member(workspace_id, current_user, db)
     run = _get_run(workspace_id, run_id, db)
+    aid = (_j(run.params_json) or {}).get("auto_eda_run_id")
+    if aid:  # the Auto EDA report made for this run goes with it
+        from ..models.auto_eda import AutoEdaRun
+
+        ae = db.query(AutoEdaRun).filter(AutoEdaRun.id == aid).first()
+        if ae is not None:
+            db.delete(ae)
     wid = (_j(run.params_json) or {}).get("working_dataset_id")
     if wid:  # the hidden working table goes with the run
         ws = db.query(Dataset).filter(Dataset.id == wid).first()

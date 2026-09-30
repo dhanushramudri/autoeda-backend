@@ -92,6 +92,116 @@ def _refresh_working_dataset(db, run, params: dict, roles: dict, art: dict, drop
         db.rollback()
 
 
+def _generate_ai_hypotheses(run, wid: int) -> str:
+    """Run the real Hypotheses generator (same as the Hypotheses page's "Generate with AI") on the working table, so the
+    embedded Hypotheses page is already filled in. Synchronous and never fatal."""
+    try:
+        from ..routers.hypotheses import _run_generate_bg
+
+        _run_generate_bg(run.workspace_id, wid, 6, run.created_by)
+        return "AI hypotheses generated"
+    except Exception as e:
+        logger.exception("DS flow %s: AI hypotheses failed", run.id)
+        return f"AI hypotheses unavailable ({str(e)[:80]})"
+
+
+def _warm_pages(run, wid: int) -> str:
+    """Compute, once and cached, every analysis the embedded AutoEDA pages show (profile, quality, missing, correlations,
+    outliers, analysis, feature importance, time series) by calling the same endpoints the pages call. After this the
+    pages open instantly. Sequential on purpose (memory). Never fatal."""
+    import os
+
+    import httpx
+
+    from ..auth import create_access_token
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        from ..models.user import User
+
+        user = db.query(User).filter(User.id == run.created_by).first()
+        if user is None:
+            return "skipped"
+        token = create_access_token({"sub": str(user.id)})
+    finally:
+        db.close()
+    headers = {"Authorization": f"Bearer {token}"}
+    bases = [b for b in (os.environ.get("DS_FLOW_SELF_URL"), "http://127.0.0.1:8000", "http://127.0.0.1:8001") if b]
+    with httpx.Client(timeout=300) as c:
+        base = None
+        for b in bases:
+            try:
+                if c.get(f"{b}/api/v1/health", timeout=5).status_code == 200:
+                    base = b
+                    break
+            except Exception:
+                continue
+        if base is None:
+            return "skipped (server address not found)"
+        root = f"{base}/api/v1/datasets/{wid}"
+        calls = [
+            ("profile", {}), ("quality-score", {}), ("missing", {}), ("correlations", {"method": "pearson", "methods": "numeric"}),
+            ("outliers", {"method": "iqr"}), ("analysis", {}), ("feature-importance", {"target": "churned", "methods": "rf"}),
+        ]
+        ok = 0
+        for path, q in calls:
+            try:
+                ok += c.get(f"{root}/{path}", params=q, headers=headers).status_code == 200
+            except Exception:
+                logger.exception("DS flow %s: warming %s failed", run.id, path)
+        try:
+            cols = c.get(f"{root}/timeseries-columns", headers=headers).json()
+            rec = cols.get("recommended") or {}
+            if rec.get("time_col") and rec.get("value_col"):
+                ok += c.get(f"{root}/timeseries", params={"time_col": rec["time_col"], "value_col": rec["value_col"], "methods": "overview"}, headers=headers).status_code == 200
+                calls.append(("timeseries", {}))
+        except Exception:
+            pass
+    return f"{ok}/{len(calls)} page analyses ready"
+
+
+def _run_auto_eda(db, run, params: dict) -> str:
+    """Run the real Auto EDA agent (plan -> auto-approve -> execute -> report) on the flow's working table, so the
+    flow's EDA step is exactly what the Auto EDA page does. Never fatal for the flow."""
+    try:
+        from ..models.auto_eda import AutoEdaRun
+        from ..routers.auto_eda import _run_in_background
+
+        wid = params.get("working_dataset_id")
+        if not wid:
+            return "skipped (no working table)"
+        er = AutoEdaRun(
+            workspace_id=run.workspace_id, dataset_ids_json=json.dumps([wid]), created_by=run.created_by, status="pending", max_items=12,
+            business_context=("Churn analysis of renewal data. The column 'churned' is 1 when the account churned and 0 when it renewed "
+                              "(blank = renewal still open). Focus on what drives churn, which segments churn most, data quality problems "
+                              "and revenue at risk."),
+        )
+        db.add(er)
+        db.commit()
+        db.refresh(er)
+        params["auto_eda_run_id"] = er.id
+        run.params_json = json.dumps(params)
+        db.add(run)
+        db.commit()
+        title = f"Churn EDA — {run.dataset_name or 'data'}"
+        _run_in_background(run.workspace_id, [wid], er.id, run.created_by, False, title)  # plans, then stops at "planned"
+        db.refresh(er)
+        if er.status == "planned":  # the approval gate is automatic inside a flow
+            er.status = "running"
+            db.add(er)
+            db.commit()
+            _run_in_background(run.workspace_id, [wid], er.id, run.created_by, True)
+            db.refresh(er)
+        status = er.status
+        warm = _warm_pages(run, wid)
+        return f"{status} · {warm}"
+    except Exception as e:
+        logger.exception("DS flow %s: Auto EDA failed", run.id)
+        db.rollback()
+        return f"failed ({str(e)[:120]})"
+
+
 def execute_run(run_id: int) -> None:
     from ..database import SessionLocal
     from ..models.dataset import Dataset
@@ -142,6 +252,7 @@ def execute_run(run_id: int) -> None:
 
         for key, title, fn, needs_df in _all_stages():
             st = by_key[key]
+            auto_status = None
             st["status"], st["started_at"] = "running", _now_iso()
             persist()
             t0 = time.time()
@@ -173,6 +284,13 @@ def execute_run(run_id: int) -> None:
                         (outputs if k in HEAVY_ART else art)[k] = v
                     if key == "leakage":
                         _refresh_working_dataset(db, run, params, roles, art, drop=set())
+                    if key == "eda":
+                        results[key] = res
+                        st["summary"], st["logs"] = stage_summary(key, res)
+                        persist()  # the flow's own EDA visuals are visible while Auto EDA runs
+                        auto_status = _run_auto_eda(db, run, params)
+                    if key == "hypotheses" and params.get("working_dataset_id"):
+                        auto_status = _generate_ai_hypotheses(run, params["working_dataset_id"])
                     if key == "understand":
                         merged = None  # the working table now lives in `art`; don't hold a second copy in the server process
                     if key == "models":
@@ -188,6 +306,11 @@ def execute_run(run_id: int) -> None:
                     for k in [k for k in art if k not in later]:
                         del art[k]
                 st["summary"], st["logs"] = stage_summary(key, res)
+                if auto_status and key == "eda":
+                    st["logs"] = [f"Auto EDA report: {auto_status}"] + st["logs"]
+                    st["summary"] = f"{st['summary']} · Auto EDA {auto_status}"
+                elif auto_status:
+                    st["logs"] = [auto_status] + st["logs"]
                 st["status"] = "done"
             except (AnalysisTimeout, AnalysisCrashed) as e:
                 st["status"], st["summary"], st["logs"] = "error", str(e), [str(e)]
