@@ -170,14 +170,16 @@ def build_headline(results: dict) -> dict:
 # narrative
 # ---------------------------------------------------------------------------
 
+# Only drivers with an accurate, specific remedy get an action. A driver with no rule is still listed in
+# "Drivers"; it just isn't given an invented recommendation.
 _ACTION_RULES = [
-    (r"upsell|downsell|expansion|contract|renewal", "Review commercial history with the account owner; open a renewal / expansion conversation before the next contract milestone."),
-    (r"agent|seat|utili[sz]ation|license|user", "Run an adoption check: low or shrinking seat/agent usage is a leading indicator — schedule enablement or a rightsizing conversation."),
-    (r"nps|csat|sentiment|satisf", "Trigger a sentiment recovery play: executive outreach and a service review for accounts with falling satisfaction."),
-    (r"ticket|support|outage|sla|resolution", "Escalate support health: review open tickets, resolution times and recent incidents for at-risk accounts."),
-    (r"payment|dunning|billing|late|overdue", "Involve finance early: resolve billing friction and overdue payments before they turn into cancellations."),
-    (r"touch|contact|outreach|call|engage|crm", "Increase proactive contact: assign a named owner and a touchpoint cadence for accounts with falling engagement."),
-    (r"arr|revenue|discount|price|amount", "Prioritise by revenue: give the largest at-risk accounts executive sponsorship and a tailored retention offer."),
+    (r"auto[_ ]?renew", "Move these accounts onto auto-renewal and confirm their payment method before the renewal date."),
+    (r"suggested[_ ]?leave|desire[_ ]?to[_ ]?cancel|switching|competitor",
+     "The customer has signalled they may leave: assign an owner for a save call before the renewal date."),
+    (r"accreditation|engagement", "Follow up on accreditation progress and contractor engagement with these accounts."),
+    (r"complain|dissatisf|negative[_ ]?(customer|experience)", "Resolve open complaints and service issues before the renewal conversation."),
+    (r"overdue|dunning|late[_ ]?payment|payment[_ ]?(issue|failed)", "Clear overdue or failed payments early so billing friction doesn't turn into cancellation."),
+    (r"upsell|downsell|expansion", "Review the account's recent commercial changes with the account owner before renewal."),
 ]
 
 
@@ -200,14 +202,14 @@ def _template_narrative(h: dict, hyps: list[dict]) -> dict:
         parts.append(f"{h['model']}: AUC {h['roc_auc']:.2f} on accounts it never saw. The riskiest 10% churn at {h['lift_top10']:.1f}x the average rate "
                      f"and contain {h['recall_top10'] * 100:.0f}% of all churners.")
     if h.get("top_drivers"):
-        parts.append("Top drivers: " + "; ".join(_label(d["feature"]) + f" ({d['direction']})" for d in h["top_drivers"][:3]) + ".")
+        parts.append("Top drivers: " + "; ".join(f"{_label(d['feature'])}: {d['direction']}" for d in h["top_drivers"][:3]) + ".")
     seen, actions = set(), []
     for d in h.get("top_drivers", []):
         act = _action_for(d["feature"])
         if act is None or act in seen:
             continue
         seen.add(act)
-        actions.append({"driver": _label(d["feature"]), "action": act})
+        actions.append({"driver": f"{_label(d['feature'])}: {d['direction']}", "action": act})
         if len(actions) >= 5:
             break
     return {"executive_summary": " ".join(parts), "actions": actions, "source": "template"}
@@ -353,6 +355,6 @@ def build_markdown(run_title: str, dataset_name: str, results: dict, headline: d
         md.append(f"## Added columns\n\nOriginal rows and columns are unchanged. Filter ds_is_current_row = 1 for one row per account.\n\n{_table(['Added column', 'Meaning'], rows)}")
 
     md.append("## Notes\n\n- Expected loss = churn probability x the value column; it does not say when revenue is lost.\n"
-              "- Drivers are associations, not proof of cause.\n"
+              "- Drivers are associations, not proof of cause. A driver can also be a reaction to risk (for example a discount offered to a customer who had already threatened to leave).\n"
               "- Hypothesis tests use one row per account; p-values are corrected for multiple testing (Benjamini-Hochberg).")
     return "\n\n".join(md) + "\n"

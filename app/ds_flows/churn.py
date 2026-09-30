@@ -38,8 +38,8 @@ warnings.filterwarnings("ignore")
 
 SEED = 42
 META = ("__y", "__date", "__entity", "__row")
-# Training rows are sampled by account above this. Lower it on small servers (env DS_FLOW_MAX_TRAIN_ROWS).
-MAX_TRAIN_ROWS = int(os.environ.get("DS_FLOW_MAX_TRAIN_ROWS", 100_000))
+# Training rows are sampled by account above this (50k keeps a 4 GB server safe; override with env DS_FLOW_MAX_TRAIN_ROWS).
+MAX_TRAIN_ROWS = int(os.environ.get("DS_FLOW_MAX_TRAIN_ROWS", 50_000))
 
 _LEAK_NAME = re.compile(r"(^|_)(future|next|post|after|forward|outcome|churned|cancel|cancelled|canceled|lost|renewed|retained)(_|$)", re.I)
 _ID_LIKE = re.compile(r"(_id|^id|_ref|_key|_uuid)$", re.I)
@@ -350,7 +350,15 @@ def stage_eda(ctx):
                     seg.append({"dimension": str(c), "group": (str(g) if str(g).strip() else "(blank)"), "n": int(len(sub)), "churn_rate": float(sub["__y"].mean())})
     for s_ in seg:
         s_["lift"] = s_["churn_rate"] / base if base else None
-    out["segments"] = sorted(seg, key=lambda d: -abs((d["lift"] or 1) - 1))[:24]
+    seg = sorted(seg, key=lambda d: -abs((d["lift"] or 1) - 1))
+    seen_seg, uniq_seg = set(), []
+    for s_ in seg:
+        key_ = (s_["n"], round(s_["churn_rate"], 5))
+        if key_ in seen_seg:
+            continue  # the same rows under another column name
+        seen_seg.add(key_)
+        uniq_seg.append(s_)
+    out["segments"] = uniq_seg[:24]
 
     # driver profiles: churn rate by quantile bin of the strongest numeric signals
     bins_out = []
@@ -476,6 +484,14 @@ def stage_hypotheses(ctx):
         else:
             h["verdict"] = "inconclusive"
     hyps.sort(key=lambda h: (h["q_value"], -h["effect"]))
+    seen_stats, unique = set(), []
+    for h in hyps:
+        sig = (h["n"], round(h["effect"], 4), round(h.get("churn_rate_high") or 0, 4), round(h.get("churn_rate_low") or 0, 4))
+        if sig in seen_stats:
+            continue  # same statistics as an earlier finding: a duplicate of the same column
+        seen_stats.add(sig)
+        unique.append(h)
+    hyps = unique
     result = {
         "tested_on_rows": int(len(indep)), "base_rate": base, "one_row_per_entity": bool(len(indep) < len(L)),
         "correction": "Benjamini-Hochberg FDR across all tested hypotheses",
@@ -1106,10 +1122,11 @@ def stage_validate(ctx):
         d = pd.DataFrame({"date": work.loc[te, "__date"], "y": work.loc[te, "__y"], "p": ctx["art"]["p_hold_cal"]})
         aucs = []
         for dt, s in d.groupby("date"):
-            if 0 < s["y"].sum() < len(s) and len(s) >= 30:
+            if s["y"].sum() >= 10 and (len(s) - s["y"].sum()) >= 10 and len(s) >= 100:
                 aucs.append(roc_auc_score(s["y"], s["p"]))
         if len(aucs) >= 3:
-            add("Stable across time", "pass" if min(aucs) >= 0.6 else "warn", f"Holdout AUC by snapshot ranges {min(aucs):.2f}–{max(aucs):.2f} over {len(aucs)} snapshots.")
+            add("Stable across time", "pass" if min(aucs) >= 0.6 else "warn",
+                f"Holdout AUC per period: median {float(np.median(aucs)):.2f}, range {min(aucs):.2f}–{max(aucs):.2f} across {len(aucs)} periods (periods with under 100 rows ignored).")
     # does the label behave like churn? positives should not coincide with growth / larger accounts
     lab = _labeled(work)
     yv = work.loc[lab, "__y"]
@@ -1131,6 +1148,17 @@ def stage_validate(ctx):
         if mn and mp / mn > 2:
             concern = f"Labelled-positive accounts are {mp/mn:.1f}× larger in {val} than the rest, which is unusual for churn — confirm the label definition."
     add("Label behaves like churn", "warn" if concern else "pass", concern or "Positives do not coincide with growth or unusually large accounts.")
+
+    imps = [t for t in ((ctx["results"].get("explain") or {}).get("top_features") or []) if t["importance"] > 0]
+    if len(imps) >= 3:
+        tot = sum(t["importance"] for t in imps)
+        top = imps[0]
+        share = top["importance"] / tot if tot else 0
+        if share >= 0.4:
+            add("No single feature dominates", "warn",
+                f"{pretty_feature(top['feature'])} carries {share * 100:.0f}% of the model's signal. Confirm with the data owner that it is known before the renewal decision.")
+        else:
+            add("No single feature dominates", "pass", f"The largest driver carries {share * 100:.0f}% of the signal.")
 
     pos = ctx["results"]["understand"]["positives"]
     add("Enough churn examples", "pass" if pos >= 100 else ("warn" if pos >= 50 else "fail"), f"{pos} churned rows in the labelled data.")
