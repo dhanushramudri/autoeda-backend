@@ -57,7 +57,7 @@ def _all_stages():
 def initial_stages(flow_key: str) -> list[dict]:
     stages = [{"key": k, "title": t, "status": "pending", "summary": None, "logs": [], "started_at": None, "finished_at": None, "seconds": None}
               for k, t, _fn, _needs in _all_stages()]
-    stages.append({"key": "report", "title": "Write board summary", "status": "pending", "summary": None, "logs": [],
+    stages.append({"key": "report", "title": "Write summary", "status": "pending", "summary": None, "logs": [],
                    "started_at": None, "finished_at": None, "seconds": None})
     return stages
 

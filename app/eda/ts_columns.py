@@ -59,6 +59,12 @@ def _infer_dayfirst(txt: pd.Series) -> bool:
     b = pd.to_numeric(parts[1], errors="coerce")
     if (a > 12).any() and not (b > 12).any():
         return True
+    if (b > 12).any() and not (a > 12).any():
+        return False
+    # both parts <= 12: a part that never changes is the day of a first-of-month style column (01-11-2024 = 1 Nov)
+    na, nb = a.dropna().nunique(), b.dropna().nunique()
+    if na == 1 and nb > 1:
+        return True
     return False
 
 

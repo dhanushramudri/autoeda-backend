@@ -260,7 +260,7 @@ def _llm_narrative(h: dict, hyps: list[dict], tiers: list[dict]) -> dict | None:
             return None
         facts = _display_facts(h, hyps, tiers)
         prompt = (
-            "You are a senior data scientist writing for a board of directors. Below are FACTS computed by a churn analysis. "
+            "You are a senior data scientist writing for business executives. Below are FACTS computed by a churn analysis. "
             "Write using ONLY these facts — do not invent, round differently, or add any number that is not present.\n\n"
             f"FACTS (JSON):\n{json.dumps(facts, default=str, indent=1)[:6000]}\n\n"
             'Respond with ONLY a JSON object: {"executive_summary": "<=110 words, plain business English, no jargon", '
