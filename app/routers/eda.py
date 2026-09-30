@@ -478,6 +478,31 @@ def get_feature_importance_methods(
         ]
     }
 
+@router.get("/{dataset_id}/timeseries-columns")
+def get_timeseries_columns(
+    dataset_id: int,
+    row_limit: Optional[int] = Query(None, ge=ROW_LIMIT_MIN, le=ROW_LIMIT_MAX),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Columns usable as the time axis / value series (content-based, not name- or profiler-based)."""
+    ds = _get_authorized_dataset(dataset_id, current_user, db)
+    cache_key = {"type": "timeseries_columns", "row_limit": row_limit}
+    cached = get_cached_result(db, dataset_id, "timeseries_columns", cache_key, ds.content_hash or "")
+    if cached:
+        return cached
+    try:
+        df = _load_df(ds, row_limit)
+        from ..eda.ts_columns import detect_time_series_columns
+        result = _run_isolated(detect_time_series_columns, df)
+        store_result(db, dataset_id, "timeseries_columns", cache_key, result, ds.content_hash or "")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{dataset_id}/timeseries", response_model=TimeSeriesResult, response_model_exclude_unset=True)
 def get_timeseries(
     dataset_id: int,

@@ -1,0 +1,191 @@
+"""Executes a Data Science Flow run in the background and persists progress after every stage.
+
+Zero configuration: the run loads every dataset it was given (by default, the whole workspace), a first
+"discover" stage works out the outcome column, account key, date, revenue and how the tables link, and the
+remaining stages run on the combined table. Each stage runs in the shared process pool (app/process_pool.py),
+so a heavy model fit can't starve other users and a crash/OOM only fails that stage. The UI polls the run row,
+which always holds the stage timeline and every finished stage's results.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
+
+from ..process_pool import AnalysisCrashed, AnalysisTimeout, run_isolated
+
+logger = logging.getLogger("autoeda.ds_flows.runner")
+
+# A stage failing here aborts the run (nothing downstream can work without it); the others degrade gracefully.
+CRITICAL = {"discover", "understand", "leakage", "features", "select", "models", "value", "build"}
+HEAVY_ART = {"model_bytes", "enriched_csv", "accounts_csv", "dictionary_csv"}
+STAGE_TIMEOUT = {"discover": 600, "models": 1800, "explain": 600, "hypotheses": 600}
+DEFAULT_TIMEOUT = 600
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _all_stages():
+    from .churn import STAGES
+    from .discover import stage_discover
+
+    return [("discover", "Discover & link your data", stage_discover, False)] + list(STAGES)
+
+
+def initial_stages(flow_key: str) -> list[dict]:
+    stages = [{"key": k, "title": t, "status": "pending", "summary": None, "logs": [], "started_at": None, "finished_at": None, "seconds": None}
+              for k, t, _fn, _needs in _all_stages()]
+    stages.append({"key": "report", "title": "Write board summary", "status": "pending", "summary": None, "logs": [],
+                   "started_at": None, "finished_at": None, "seconds": None})
+    return stages
+
+
+def unique_table_names(datasets) -> dict[int, str]:
+    """dataset id -> table name, disambiguating duplicate names."""
+    seen: dict[str, int] = {}
+    out: dict[int, str] = {}
+    for d in datasets:
+        n = d.name
+        if n in seen:
+            n = f"{n} ({d.id})"
+        seen[n] = d.id
+        out[d.id] = n
+    return out
+
+
+def execute_run(run_id: int) -> None:
+    from ..database import SessionLocal
+    from ..models.dataset import Dataset
+    from ..models.ds_flow import DsFlowRun
+    from ..routers.eda import _load_df
+    from .report import build_headline, build_markdown, build_narrative, stage_summary
+
+    db = SessionLocal()
+    try:
+        run = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+        if run is None:
+            return
+        stages = json.loads(run.stages_json)
+        params = json.loads(run.params_json or "{}")
+        results: dict = {}
+
+        def persist(**fields):
+            run.stages_json = json.dumps(stages)
+            run.results_json = json.dumps(results, default=str)
+            for k, v in fields.items():
+                setattr(run, k, v)
+            db.add(run)
+            db.commit()
+
+        # ---- load every dataset we were given --------------------------------------------------
+        try:
+            datasets = db.query(Dataset).filter(Dataset.id.in_(params.get("dataset_ids") or [run.dataset_id])).all()
+            if not datasets:
+                raise RuntimeError("No datasets to analyse")
+            names = unique_table_names(datasets)
+            by_name = {names[d.id]: d for d in datasets}
+            run.status = "running"
+            persist()
+            tables = {}
+            for d in datasets:
+                tables[names[d.id]] = _load_df(d)
+            logger.info("DS flow %s: loaded %s", run_id, {n: t.shape for n, t in tables.items()})
+        except Exception as e:
+            logger.exception("DS flow %s failed to load data", run_id)
+            persist(status="error", error=f"Could not load the datasets: {e}")
+            return
+
+        art: dict = {}
+        outputs: dict = {}
+        by_key = {s["key"]: s for s in stages}
+        merged = base_df = None
+        roles: dict = {}
+
+        for key, title, fn, needs_df in _all_stages():
+            st = by_key[key]
+            st["status"], st["started_at"] = "running", _now_iso()
+            persist()
+            t0 = time.time()
+            if key == "discover":
+                ctx = {"tables": tables, "roles": {}, "params": params, "results": {}, "art": {}}
+            else:
+                ctx = {
+                    "df": (base_df if key == "build" else merged) if needs_df else None,
+                    "roles": roles, "params": params, "results": results,
+                    "art": {k: v for k, v in art.items() if k not in HEAVY_ART},
+                }
+            try:
+                res, new_art = run_isolated(fn, ctx, timeout=STAGE_TIMEOUT.get(key, DEFAULT_TIMEOUT))
+                results[key] = res
+                if key == "discover":
+                    merged, base_df = new_art["merged"], new_art["base"]
+                    roles = res["roles"]
+                    params = {**params, "exclude_columns": res["exclude_columns"]}
+                    base_ds = by_name.get(res["base_table"])
+                    if base_ds is not None:
+                        run.dataset_id = base_ds.id
+                        run.dataset_name = base_ds.name
+                        run.source_filename = os.path.basename(base_ds.file_path or "") or base_ds.name
+                        run.title = f"Churn — {base_ds.name}"
+                    run.roles_json = json.dumps(roles)
+                    tables.clear()  # free memory: the combined table now carries everything
+                else:
+                    for k, v in new_art.items():
+                        (outputs if k in HEAVY_ART else art)[k] = v
+                st["summary"], st["logs"] = stage_summary(key, res)
+                st["status"] = "done"
+            except (AnalysisTimeout, AnalysisCrashed) as e:
+                st["status"], st["summary"], st["logs"] = "error", str(e), [str(e)]
+            except Exception as e:
+                logger.exception("DS flow %s stage %s failed", run_id, key)
+                msg = str(e) or e.__class__.__name__
+                st["status"], st["summary"], st["logs"] = "error", msg[:400], [msg[:800]]
+            st["finished_at"], st["seconds"] = _now_iso(), round(time.time() - t0, 1)
+            persist()
+            if st["status"] == "error" and key in CRITICAL:
+                for later in stages:
+                    if later["status"] == "pending":
+                        later["status"], later["summary"] = "skipped", "Skipped because an earlier critical stage failed"
+                persist(status="error", error=st["summary"] if key == "discover" else f"Stage '{title}' failed: {st['summary']}")
+                return
+
+        rep = by_key["report"]
+        rep["status"], rep["started_at"] = "running", _now_iso()
+        persist()
+        t0 = time.time()
+        try:
+            headline = build_headline(results)
+            narrative = build_narrative(results, headline)
+            markdown = build_markdown(run.title or "Churn analysis", run.dataset_name or "", results, headline, narrative)
+            rep["summary"] = f"Summary written ({'AI-worded' if narrative['source'] == 'llm' else 'template'})"
+            rep["status"] = "done"
+            rep["logs"] = [f"Wording source: {narrative['source']}. Every number comes from the computed results."]
+            persist(headline_json=json.dumps(headline, default=str), narrative_json=json.dumps(narrative, default=str), markdown=markdown)
+        except Exception as e:
+            logger.exception("DS flow %s report failed", run_id)
+            rep["status"], rep["summary"] = "error", str(e)[:300]
+        rep["finished_at"], rep["seconds"] = _now_iso(), round(time.time() - t0, 1)
+
+        persist(
+            status="completed",
+            enriched_csv=outputs.get("enriched_csv"), accounts_csv=outputs.get("accounts_csv"),
+            dictionary_csv=outputs.get("dictionary_csv"), model_blob=outputs.get("model_bytes"),
+        )
+    except Exception as e:  # last-resort guard so a run can never sit in "running" forever
+        logger.exception("DS flow %s crashed", run_id)
+        try:
+            db.rollback()
+            r = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+            if r and r.status not in ("completed", "error"):
+                r.status, r.error = "error", f"Run crashed: {e}"
+                db.add(r)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()

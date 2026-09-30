@@ -899,11 +899,20 @@ def _prepare_series(df: pd.DataFrame, time_col: str, value_col: str):
     if time_col not in df.columns or value_col not in df.columns:
         return None, "Invalid columns"
 
+    if time_col == value_col:
+        return None, "Time column and value column must be different"
+
+    from .ts_columns import parse_time_column
+
     df_ts = df[[time_col, value_col]].copy()
     try:
-        df_ts[time_col] = pd.to_datetime(df_ts[time_col])
+        df_ts[time_col] = parse_time_column(df_ts[time_col])
     except Exception:
         return None, f"Cannot parse '{time_col}' as datetime"
+    if df_ts[time_col].notna().mean() < 0.5:
+        return None, f"Cannot parse '{time_col}' as datetime (fewer than half of the values are valid dates)"
+    df_ts = df_ts.dropna(subset=[time_col])
+    df_ts[value_col] = pd.to_numeric(df_ts[value_col], errors="coerce")
 
     df_ts = df_ts.sort_values(time_col).reset_index(drop=True)
     series_raw = df_ts[value_col]
