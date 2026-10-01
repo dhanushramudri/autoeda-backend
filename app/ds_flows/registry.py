@@ -65,11 +65,21 @@ def _verdict(score: int) -> str:
     return "strong" if score >= 70 else "possible" if score >= 40 else "weak" if score >= 15 else "not_detected"
 
 
+def _col_values_match(df: pd.DataFrame, col: str, pattern: str) -> bool:
+    """Check whether any sampled VALUES of a categorical column match a regex."""
+    try:
+        s = df[col].dropna().astype(str).head(500)
+        return bool(s.str.contains(pattern, case=False, regex=True, na=False).any())
+    except Exception:
+        return False
+
+
 def scan_dataset(df: pd.DataFrame) -> dict[str, Any]:
     cols = [str(c) for c in df.columns]
     roles = detect_churn_roles(df)
     times = detect_time_columns(df)
     numeric = [c for c in cols if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    categorical = [c for c in cols if not pd.api.types.is_numeric_dtype(df[c]) and 2 <= df[c].nunique(dropna=True) <= 500]
     n = len(df)
     feas: dict[str, dict] = {}
 
@@ -100,7 +110,8 @@ def scan_dataset(df: pd.DataFrame) -> dict[str, Any]:
         npts = int(parse_time_column(df[times[0]["name"]]).nunique()) if n else 0
         sig.append(f"Time axis '{times[0]['name']}' with {npts:,} distinct periods")
         score += 40 if npts >= 24 else 25 if npts >= 10 else 10
-        money = _hits(numeric, r"revenue|sales|amount|arr|mrr|value|demand|volume|qty|quantity|cost|spend|total_amount")
+        # Broader revenue / amount pattern — catches invoice_amount, sub_total_gbp, ltm_revenue etc.
+        money = _hits(numeric, r"revenue|sales|amount|arr|mrr|value|demand|volume|qty|quantity|cost|spend|total|ltm|billing|invoice|gbp|usd|eur")
         if money:
             sig.append(f"Numeric series to forecast: {', '.join(money[:3])}")
             score += 25
@@ -112,52 +123,97 @@ def scan_dataset(df: pd.DataFrame) -> dict[str, Any]:
 
     # --- revenue growth (cross-sell / upsell / lead scoring) ---
     sig, miss, score = [], [], 0
-    prod = [c for c in _hits(cols, r"product|item|sku|plan|service|module|offering|package")
-            if not pd.api.types.is_numeric_dtype(df[c]) and 2 <= df[c].nunique() <= 500]
+
+    # Product-like dimension: classic names OR broader equivalents (solution, channel, vertical, tier…)
+    PROD_NAME = r"product|item|sku|plan|service|module|offering|package|solution|channel|segment|vertical|tier|category|bundle|service_type"
+    prod = [c for c in categorical if re.search(rf"(^|[_\s-])({PROD_NAME})([_\s-]|$)", c, re.I)]
     if prod and roles["entity"]:
-        sig.append(f"Customer key + product dimension '{prod[0]}' (cross-sell basket analysis)")
+        sig.append(f"Customer key + product/solution dimension '{prod[0]}' (cross-sell basket analysis)")
         score += 55
     elif prod:
-        miss.append("Product column found but no customer key")
-    lead = [c for c in _hits(cols, r"convert|converted|lead|won|opportunity|upsell|expansion|propensity")
-            if df[c].nunique(dropna=True) == 2]
-    if lead:
-        sig.append(f"Outcome-like column(s) for lead / upsell scoring: {', '.join(lead[:3])}")
-        score += 30
+        sig.append(f"Product/solution dimension '{prod[0]}' found")
+        score += 25
+
+    # Explicit outcome column names
+    LEAD_NAME = r"convert|converted|lead|won|opportunity|upsell|expansion|propensity|cross.?sell|netsell|new.?client|new.?business"
+    lead_by_name = [c for c in cols if re.search(rf"(^|[_\s-])({LEAD_NAME})([_\s-]|$)", c, re.I)]
+    if lead_by_name:
+        sig.append(f"Growth-outcome column(s): {', '.join(lead_by_name[:3])}")
+        score += 35
+
+    # Value-based: a categorical column whose VALUES contain cross-sell / growth keywords (e.g. bucket = "Solution Cross-Sell")
+    LEAD_VALUES = r"cross.?sell|upsell|netsell|new.?client|new.?business|expansion|propensity|lead|won|converted"
+    value_cols = [c for c in categorical if not lead_by_name and _col_values_match(df, c, LEAD_VALUES)]
+    if value_cols:
+        sig.append(f"Cross-sell / growth labels found in column values: {', '.join(value_cols[:3])}")
+        score += 40
+
+    # Customer segmentation enriches revenue growth modelling
+    SEG_NAME = r"customer_type|business_model|vertical|fund_potential|depth|relationship|segment|tier|band|type|region"
+    seg = [c for c in categorical if re.search(rf"(^|[_\s-])({SEG_NAME})([_\s-]|$)", c, re.I)]
+    if seg:
+        sig.append(f"Customer segmentation attribute(s): {', '.join(seg[:3])}")
+        score += 15
+
     if roles["value"]:
         score += 10
+
     if not sig:
         miss.append("No customer × product structure or conversion outcome detected")
     feas["revenue_growth"] = {"score": min(score, 100), "signals": sig, "missing": miss}
 
     # --- pricing ---
     sig, miss, score = [], [], 0
-    price = _hits(numeric, r"price|unit_price|fee|tariff")
-    qty = _hits(numeric, r"qty|quantity|units|volume")
-    disc = _hits(numeric, r"discount|rebate|promo")
+    # Broader price detection: catches invoice_amount, sub_total_gbp_fixed, invoice_amount_gbp etc.
+    PRICE_PAT = r"price|unit_price|fee|tariff|amount|invoice|billing|sub_total|charge|rate|gbp|usd|eur|total"
+    price = [c for c in numeric if re.search(rf"(^|[_\s-])({PRICE_PAT})([_\s-]|$)", c, re.I)
+             and df[c].nunique() > 5 and df[c].median() != 0]
+    qty = _hits(numeric, r"qty|quantity|units|volume|count|invoices|num_invoices")
+    disc = _hits(numeric, r"discount|rebate|promo|concession|reduction")
+    # Dimension columns that enable price-by-segment analysis (solution, channel, customer_type…)
+    DIM_PAT = r"solution|channel|segment|customer_type|region|vertical|tier|band|category|product|service"
+    dims = [c for c in categorical if re.search(rf"(^|[_\s-])({DIM_PAT})([_\s-]|$)", c, re.I)]
     if price:
-        sig.append(f"Price column(s): {', '.join(price[:3])}")
+        sig.append(f"Invoice / revenue column(s): {', '.join(price[:3])}")
         score += 40
+    if dims:
+        sig.append(f"Pricing dimension(s) — {', '.join(dims[:3])} — enable price-by-segment analytics")
+        score += 20
     if qty:
         sig.append(f"Volume column(s): {', '.join(qty[:3])}")
-        score += 25
+        score += 15
     if disc:
         sig.append(f"Discount column(s): {', '.join(disc[:3])}")
-        score += 25
+        score += 20
     if not price:
-        miss.append("No price column")
+        miss.append("No price or invoice amount column detected")
+    if not disc:
+        miss.append("No discount / margin columns (limits full pricing optimisation)")
     feas["pricing"] = {"score": min(score, 100), "signals": sig, "missing": miss}
 
     # --- efficiency & cost ---
     sig, miss, score = [], [], 0
-    cost = _hits(numeric, r"cost|expense|opex|hours|handle_time|resolution|effort|headcount|overtime|utili[sz]ation")
+    # Broader cost / effort pattern — also picks up duration, project age, SLA etc.
+    COST_PAT = r"cost|expense|opex|hours|handle_time|resolution|effort|headcount|overtime|utili[sz]ation|duration|days|age|sla|lead_time|cycle_time|turnaround|completion"
+    cost = [c for c in numeric if re.search(rf"(^|[_\s-])({COST_PAT})([_\s-]|$)", c, re.I)]
+    # Project / operational tables: status + date columns imply delivery analytics
+    STATUS_PAT = r"status|state|stage|phase|milestone|flag|billable"
+    status_cols = [c for c in categorical if re.search(rf"(^|[_\s-])({STATUS_PAT})([_\s-]|$)", c, re.I)]
     if cost:
         sig.append(f"Cost / effort measures: {', '.join(cost[:4])}")
         score += 50 + (15 if len(cost) >= 3 else 0)
-    else:
-        miss.append("No cost, effort or utilisation measures")
+    if status_cols and times:
+        sig.append(f"Project / operational status column(s) + time axis (delivery analytics)")
+        score += 30
+    elif status_cols:
+        sig.append(f"Project / operational status column(s): {', '.join(status_cols[:3])}")
+        score += 15
     if times:
         score += 10
+    if not cost and not status_cols:
+        miss.append("No cost, effort, utilisation, or project delivery columns")
+    elif not cost:
+        miss.append("No cost / hours data — limits true cost-efficiency modelling")
     feas["efficiency_cost"] = {"score": min(score, 100), "signals": sig, "missing": miss}
 
     flows = []
