@@ -19,6 +19,38 @@ from ..process_pool import AnalysisCrashed, AnalysisTimeout, run_isolated
 
 logger = logging.getLogger("autoeda.ds_flows.runner")
 
+FLOW_LABELS: dict[str, str] = {
+    "churn":           "Churn",
+    "revenue_growth":  "Revenue Growth",
+    "pricing":         "Pricing",
+    "efficiency_cost": "Efficiency & Cost",
+}
+
+def _flow_label(flow_key: str) -> str:
+    return FLOW_LABELS.get(flow_key, flow_key.replace("_", " ").title())
+
+_FLOW_EDA_CONTEXT: dict[str, str] = {
+    "churn": (
+        "Churn analysis. The outcome column is 1 when the account churned and 0 when it renewed. "
+        "Focus on what drives churn, which segments churn most, data quality problems and revenue at risk."
+    ),
+    "revenue_growth": (
+        "Revenue growth analysis. The outcome column identifies high-growth vs. lower-growth accounts or products. "
+        "Focus on what drives revenue growth, which segments grow fastest, and the key leading indicators."
+    ),
+    "pricing": (
+        "Pricing analysis. The outcome column identifies pricing tiers, premium vs. standard, or above-average margin. "
+        "Focus on price sensitivity, segment willingness-to-pay, and the features that predict price tier."
+    ),
+    "efficiency_cost": (
+        "Efficiency and cost analysis. The outcome column identifies high-cost or low-efficiency records. "
+        "Focus on cost drivers, inefficient segments, and the operational features that predict high cost."
+    ),
+}
+
+def _flow_eda_context(flow_key: str) -> str:
+    return _FLOW_EDA_CONTEXT.get(flow_key, f"{_flow_label(flow_key)} analysis. Focus on the key drivers of the outcome column.")
+
 # A stage failing here aborts the run (nothing downstream can work without it); the others degrade gracefully.
 CRITICAL = {"discover", "understand", "leakage", "features", "select", "models", "value", "build"}
 HEAVY_ART = {"model_bytes", "enriched_csv", "accounts_csv", "dictionary_csv"}
@@ -62,12 +94,11 @@ def initial_stages(flow_key: str) -> list[dict]:
     if flow_key == "forecasting":
         from .forecast import STAGES as FS
         return [_s(k, t) for k, t, _fn, _needs in FS]
-    elif flow_key == "churn":
+    else:
+        # All other flows (churn, revenue_growth, pricing, efficiency_cost) run the same full pipeline.
         stages = [_s(k, t) for k, t, _fn, _needs in _all_stages()]
         stages.append(_s("report", "Write summary"))
         return stages
-    else:
-        return [_s("scope", "Analyse feasibility scope")]
 
 
 def unique_table_names(datasets) -> dict[int, str]:
@@ -181,9 +212,7 @@ def _run_auto_eda(db, run, params: dict) -> str:
             return "skipped (no working table)"
         er = AutoEdaRun(
             workspace_id=run.workspace_id, dataset_ids_json=json.dumps([wid]), created_by=run.created_by, status="pending", max_items=12,
-            business_context=("Churn analysis of renewal data. The column 'churned' is 1 when the account churned and 0 when it renewed "
-                              "(blank = renewal still open). Focus on what drives churn, which segments churn most, data quality problems "
-                              "and revenue at risk."),
+            business_context=_flow_eda_context(run.flow_key),
         )
         db.add(er)
         db.commit()
@@ -192,7 +221,7 @@ def _run_auto_eda(db, run, params: dict) -> str:
         run.params_json = json.dumps(params)
         db.add(run)
         db.commit()
-        title = f"Churn EDA — {run.dataset_name or 'data'}"
+        title = f"{_flow_label(run.flow_key)} EDA — {run.dataset_name or 'data'}"
         _run_in_background(run.workspace_id, [wid], er.id, run.created_by, False, title)  # plans, then stops at "planned"
         db.refresh(er)
         if er.status == "planned":  # the approval gate is automatic inside a flow
@@ -284,7 +313,7 @@ def execute_run(run_id: int) -> None:
                         run.dataset_id = base_ds.id
                         run.dataset_name = base_ds.name
                         run.source_filename = os.path.basename(base_ds.file_path or "") or base_ds.name
-                        run.title = f"Churn — {base_ds.name}"
+                        run.title = f"{_flow_label(run.flow_key)} — {base_ds.name}"
                     run.roles_json = json.dumps(roles)
                     tables.clear()  # free memory: the combined table now carries everything
                 else:
@@ -578,9 +607,9 @@ def execute_flow_run(run_id: int) -> None:
     finally:
         db.close()
 
-    if flow_key == "churn":
-        execute_run(run_id)
-    elif flow_key == "forecasting":
+    if flow_key == "forecasting":
         execute_forecast_run(run_id)
     else:
-        execute_scope_run(run_id)
+        # churn, revenue_growth, pricing, efficiency_cost all run the same full pipeline.
+        # The discover stage auto-detects the outcome column for each dataset.
+        execute_run(run_id)
