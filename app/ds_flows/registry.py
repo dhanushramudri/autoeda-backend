@@ -27,22 +27,22 @@ FLOWS: list[dict[str, Any]] = [
                    "Select features & split", "Train & compare models", "Explain drivers", "Risk tiers & revenue at risk", "Validate", "Build deliverables"],
     },
     {
-        "key": "revenue_growth", "category": "Revenue Growth", "name": "Cross-sell, upsell & lead scoring", "status": "coming_soon", "priority": 1,
+        "key": "revenue_growth", "category": "Revenue Growth", "name": "Cross-sell, upsell & lead scoring", "status": "available", "priority": 1,
         "tagline": "Cross-sell, upsell and lead-scoring playbooks that drive top-line growth.",
         "outputs": ["Next-best-product per customer", "Propensity scores", "Revenue opportunity sizing"], "stages": [],
     },
     {
-        "key": "forecasting", "category": "Forecasting", "name": "Revenue, demand & cash-flow forecasting", "status": "coming_soon", "priority": 2,
+        "key": "forecasting", "category": "Forecasting", "name": "Revenue, demand & cash-flow forecasting", "status": "available", "priority": 2,
         "tagline": "Revenue, demand and cash-flow forecasting models to support planning, budgeting and diligence.",
         "outputs": ["Forecast with intervals", "Backtested model comparison", "Seasonality & trend findings"], "stages": [],
     },
     {
-        "key": "pricing", "category": "Pricing", "name": "Pricing & discount optimisation", "status": "coming_soon", "priority": 4,
+        "key": "pricing", "category": "Pricing", "name": "Pricing & discount optimisation", "status": "available", "priority": 4,
         "tagline": "Re-pricing, discounting and monetization strategies to defend or grow margin.",
         "outputs": ["Price elasticity", "Discount leakage", "Margin uplift scenarios"], "stages": [],
     },
     {
-        "key": "efficiency_cost", "category": "Efficiency & Cost", "name": "Efficiency & cost automation", "status": "coming_soon", "priority": 5,
+        "key": "efficiency_cost", "category": "Efficiency & Cost", "name": "Efficiency & cost automation", "status": "available", "priority": 5,
         "tagline": "Automation and productivity playbooks that improve EBITDA and operating efficiency.",
         "outputs": ["Cost drivers", "Automation candidates", "EBITDA impact"], "stages": [],
     },

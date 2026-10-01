@@ -178,14 +178,12 @@ def create_run(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
-    from ..ds_flows.runner import execute_run, initial_stages
+    from ..ds_flows.runner import execute_flow_run, initial_stages
 
     _assert_member(workspace_id, current_user, db)
     flow = get_flow(payload.flow_key)
     if flow is None:
         raise HTTPException(status_code=404, detail="Unknown flow")
-    if flow["status"] != "available":
-        raise HTTPException(status_code=400, detail=f"'{flow['name']}' is not available yet")
     datasets = _visible_datasets(workspace_id, db, payload.dataset_ids)
     if not datasets:
         raise HTTPException(status_code=400, detail="This workspace has no datasets to analyse")
@@ -207,7 +205,7 @@ def create_run(
     db.add(run)
     db.commit()
     db.refresh(run)
-    background.add_task(execute_run, run.id)
+    background.add_task(execute_flow_run, run.id)
     return {"run_id": run.id}
 
 

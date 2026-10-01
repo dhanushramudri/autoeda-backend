@@ -55,11 +55,19 @@ def _all_stages():
 
 
 def initial_stages(flow_key: str) -> list[dict]:
-    stages = [{"key": k, "title": t, "status": "pending", "summary": None, "logs": [], "started_at": None, "finished_at": None, "seconds": None}
-              for k, t, _fn, _needs in _all_stages()]
-    stages.append({"key": "report", "title": "Write summary", "status": "pending", "summary": None, "logs": [],
-                   "started_at": None, "finished_at": None, "seconds": None})
-    return stages
+    def _s(key, title):
+        return {"key": key, "title": title, "status": "pending", "summary": None, "logs": [],
+                "started_at": None, "finished_at": None, "seconds": None}
+
+    if flow_key == "forecasting":
+        from .forecast import STAGES as FS
+        return [_s(k, t) for k, t, _fn, _needs in FS]
+    elif flow_key == "churn":
+        stages = [_s(k, t) for k, t, _fn, _needs in _all_stages()]
+        stages.append(_s("report", "Write summary"))
+        return stages
+    else:
+        return [_s("scope", "Analyse feasibility scope")]
 
 
 def unique_table_names(datasets) -> dict[int, str]:
@@ -362,3 +370,217 @@ def execute_run(run_id: int) -> None:
             pass
     finally:
         db.close()
+
+
+def execute_forecast_run(run_id: int) -> None:
+    """Run the fully-implemented forecast pipeline for a ds-flow run."""
+    from .forecast import STAGES as FORECAST_STAGES
+
+    from ..database import SessionLocal
+    from ..models.dataset import Dataset
+    from ..models.ds_flow import DsFlowRun
+    from ..routers.eda import _load_df
+
+    FORECAST_CRITICAL = {"detect", "models", "forecast"}
+
+    db = SessionLocal()
+    try:
+        run = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+        if run is None:
+            return
+        stages = json.loads(run.stages_json)
+        params = json.loads(run.params_json or "{}")
+        results: dict = {}
+
+        def persist(**fields):
+            run.stages_json = json.dumps(stages)
+            run.results_json = json.dumps(results, default=str)
+            for k, v in fields.items():
+                setattr(run, k, v)
+            db.add(run)
+            db.commit()
+
+        try:
+            datasets = db.query(Dataset).filter(Dataset.id.in_(params.get("dataset_ids") or [run.dataset_id])).all()
+            if not datasets:
+                raise RuntimeError("No datasets to analyse")
+            names = unique_table_names(datasets)
+            run.status = "running"
+            persist()
+            tables = {names[d.id]: _load_df(d) for d in datasets}
+            logger.info("DS flow %s (forecast): loaded %s", run_id, {n: t.shape for n, t in tables.items()})
+        except Exception as e:
+            logger.exception("DS flow %s (forecast) failed to load data", run_id)
+            persist(status="error", error=f"Could not load the datasets: {e}")
+            return
+
+        art: dict = {}
+        by_key = {s["key"]: s for s in stages}
+
+        for key, title, fn, _ in FORECAST_STAGES:
+            st = by_key.get(key)
+            if st is None:
+                continue
+            st["status"], st["started_at"] = "running", _now_iso()
+            persist()
+            t0 = time.time()
+            ctx = {"tables": tables, "params": params, "results": results, "art": art} if key == "detect" \
+                else {"params": params, "results": results, "art": art}
+            try:
+                res, new_art = run_isolated(fn, ctx, timeout=STAGE_TIMEOUT.get(key, DEFAULT_TIMEOUT))
+                results[key] = res
+                art.update(new_art)
+                if key == "detect":
+                    tables.clear()
+                    first_ds = datasets[0]
+                    run.dataset_id = first_ds.id
+                    run.dataset_name = first_ds.name
+                    run.source_filename = os.path.basename(first_ds.file_path or "") or first_ds.name
+                    run.title = f"Forecasting — {first_ds.name}"
+                if isinstance(res, dict):
+                    if "periods" in res and "frequency" in res:
+                        st["summary"] = f"{res.get('periods')} {res.get('frequency')} periods, table '{res.get('table', '')}'"
+                    elif "models" in res:
+                        best = min(res.get("models", []), key=lambda m: m.get("aic", 0), default={})
+                        st["summary"] = f"Best model: {best.get('model', 'n/a')}" if best else f"{key}: done"
+                    else:
+                        st["summary"] = f"{key}: done"
+                else:
+                    st["summary"] = f"{key}: done"
+                st["status"] = "done"
+            except (AnalysisTimeout, AnalysisCrashed) as e:
+                st["status"], st["summary"], st["logs"] = "error", str(e), [str(e)]
+            except Exception as e:
+                logger.exception("DS flow %s (forecast) stage %s failed", run_id, key)
+                msg = str(e) or e.__class__.__name__
+                st["status"], st["summary"], st["logs"] = "error", msg[:400], [msg[:800]]
+            st["finished_at"], st["seconds"] = _now_iso(), round(time.time() - t0, 1)
+            persist()
+            if st["status"] == "error" and key in FORECAST_CRITICAL:
+                for later in stages:
+                    if later["status"] == "pending":
+                        later["status"], later["summary"] = "skipped", "Skipped because an earlier critical stage failed"
+                persist(status="error", error=f"Stage '{title}' failed: {st['summary']}")
+                return
+
+        persist(status="completed")
+    except Exception as e:
+        logger.exception("DS flow %s (forecast) crashed", run_id)
+        try:
+            db.rollback()
+            r = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+            if r and r.status not in ("completed", "error"):
+                r.status, r.error = "error", f"Run crashed: {e}"
+                db.add(r)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def execute_scope_run(run_id: int) -> None:
+    """For flows without a full pipeline: run the feasibility scan and record a scope report."""
+    from ..database import SessionLocal
+    from ..models.dataset import Dataset
+    from ..models.ds_flow import DsFlowRun
+    from ..routers.eda import _load_df
+    from .registry import get_flow, scan_dataset
+
+    db = SessionLocal()
+    try:
+        run = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+        if run is None:
+            return
+        stages = json.loads(run.stages_json)
+        params = json.loads(run.params_json or "{}")
+
+        def persist(**fields):
+            run.stages_json = json.dumps(stages)
+            for k, v in fields.items():
+                setattr(run, k, v)
+            db.add(run)
+            db.commit()
+
+        by_key = {s["key"]: s for s in stages}
+        st = by_key.get("scope")
+        if st:
+            st["status"], st["started_at"] = "running", _now_iso()
+        run.status = "running"
+        persist()
+        t0 = time.time()
+
+        try:
+            datasets = db.query(Dataset).filter(Dataset.id.in_(params.get("dataset_ids") or [run.dataset_id])).all()
+            if not datasets:
+                raise RuntimeError("No datasets to analyse")
+            names = unique_table_names(datasets)
+            tables = {names[d.id]: _load_df(d) for d in datasets}
+            flow = get_flow(run.flow_key)
+            best_scan: dict | None = None
+            best_score = -1
+            for df in tables.values():
+                for f in scan_dataset(df).get("flows", []):
+                    if f["key"] == run.flow_key and f["feasibility"]["score"] > best_score:
+                        best_score = f["feasibility"]["score"]
+                        best_scan = f
+            first_ds = datasets[0]
+            run.dataset_id = first_ds.id
+            run.dataset_name = first_ds.name
+            run.source_filename = os.path.basename(first_ds.file_path or "") or first_ds.name
+            run.title = f"{flow['category'] if flow else run.flow_key} — {first_ds.name}"
+            if st:
+                verdict = best_scan["feasibility"]["verdict"] if best_scan else "not_detected"
+                signals = best_scan["feasibility"].get("signals", []) if best_scan else []
+                missing = best_scan["feasibility"].get("missing", []) if best_scan else []
+                summary_parts = [f"Verdict: {verdict} (score {best_score})"]
+                if signals:
+                    summary_parts.append(f"Signals: {'; '.join(signals[:3])}")
+                if missing:
+                    summary_parts.append(f"Missing: {'; '.join(missing[:2])}")
+                st["summary"] = " · ".join(summary_parts)
+                st["logs"] = signals + [f"Missing: {m}" for m in missing]
+                st["status"] = "done"
+                st["finished_at"], st["seconds"] = _now_iso(), round(time.time() - t0, 1)
+        except Exception as e:
+            logger.exception("DS flow %s (scope) failed", run_id)
+            if st:
+                st["status"], st["summary"] = "error", str(e)[:300]
+                st["finished_at"], st["seconds"] = _now_iso(), round(time.time() - t0, 1)
+            persist(status="error", error=f"Scope analysis failed: {e}")
+            return
+
+        persist(status="completed")
+    except Exception as e:
+        logger.exception("DS flow %s (scope) crashed", run_id)
+        try:
+            db.rollback()
+            r = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+            if r and r.status not in ("completed", "error"):
+                r.status, r.error = "error", f"Run crashed: {e}"
+                db.add(r)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def execute_flow_run(run_id: int) -> None:
+    """Dispatcher: routes to the correct executor based on the run's flow_key."""
+    from ..database import SessionLocal
+    from ..models.ds_flow import DsFlowRun
+
+    db = SessionLocal()
+    try:
+        run = db.query(DsFlowRun).filter(DsFlowRun.id == run_id).first()
+        flow_key = run.flow_key if run else "churn"
+    finally:
+        db.close()
+
+    if flow_key == "churn":
+        execute_run(run_id)
+    elif flow_key == "forecasting":
+        execute_forecast_run(run_id)
+    else:
+        execute_scope_run(run_id)
