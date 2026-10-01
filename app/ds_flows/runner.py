@@ -46,6 +46,10 @@ _FLOW_EDA_CONTEXT: dict[str, str] = {
         "Efficiency and cost analysis. The outcome column identifies high-cost or low-efficiency records. "
         "Focus on cost drivers, inefficient segments, and the operational features that predict high cost."
     ),
+    "forecasting": (
+        "Time-series forecasting analysis. The table is a single series: one row per period, with a Period column "
+        "and the forecasted measure. Focus on trend, seasonality, turning points and anything unusual in the history."
+    ),
 }
 
 def _flow_eda_context(flow_key: str) -> str:
@@ -466,6 +470,27 @@ def execute_forecast_run(run_id: int) -> None:
                     run.dataset_name = first_ds.name
                     run.source_filename = os.path.basename(first_ds.file_path or "") or first_ds.name
                     run.title = f"Forecasting — {first_ds.name}"
+                    # Same real working-table + Auto EDA + Hypotheses agents churn gets (see working.py / _run_auto_eda /
+                    # _generate_ai_hypotheses above) — the prepared series is already a clean table, so no churn-specific
+                    # feature-frame building is needed, just save it and point the two generic agents at it.
+                    agent_logs = []
+                    try:
+                        working_frame = new_art.get("working_frame")
+                        if working_frame is not None:
+                            from .working import upsert_working_dataset
+
+                            wid = upsert_working_dataset(db, run, working_frame, params.get("working_dataset_id"))
+                            params["working_dataset_id"] = wid
+                            run.params_json = json.dumps(params)
+                            db.add(run)
+                            db.commit()
+                            agent_logs.append(_run_auto_eda(db, run, params))
+                            agent_logs.append(_generate_ai_hypotheses(run, wid))
+                    except Exception:
+                        logger.exception("DS flow %s (forecast): could not prepare the working dataset", run_id)
+                        db.rollback()
+                    if agent_logs:
+                        st["logs"] = agent_logs
                 if isinstance(res, dict):
                     if "periods" in res and "frequency" in res:
                         st["summary"] = f"{res.get('periods')} {res.get('frequency')} periods, table '{res.get('table', '')}'"
