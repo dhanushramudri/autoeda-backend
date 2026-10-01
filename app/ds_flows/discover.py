@@ -32,7 +32,7 @@ NOT_CHURN = re.compile(r"(not|non|no)[ _-]*churn", re.I)
 WON_WORDS = re.compile(r"(^won$|renew|retain|active|stay|success|kept)", re.I)
 OPEN_WORDS = re.compile(r"(open|pending|in progress|tbd|unknown|n/?a|not yet|undecided|current)", re.I)
 LABEL_NAME = re.compile(r"(outcome|status|result|churn|label|target|decision)", re.I)
-KEY_NAME = re.compile(r"(_id|id|_ref|ref|_key|key|_no|number|code)$", re.I)
+KEY_NAME = re.compile(r"(_id|id|_ref|ref|_key|key|_hk|_no|number|code)$", re.I)
 EVENT_DATE_NAME = re.compile(r"(date|time|created|sent|call|contact)", re.I)
 PERIOD_NAME = re.compile(r"(renewal[_ ]?(month|period)|snapshot|as_of|calculated|billing[_ ]?month|period|^month)", re.I)
 VALUE_NAME = re.compile(r"(total_amount|revenue|arr|mrr|amount|net|gross|price|fee|value|spend)", re.I)
@@ -322,6 +322,138 @@ def _attach_events(base: pd.DataFrame, key: str, period: pd.Series | None, ev: p
     return agg, info
 
 
+
+# ---------------------------------------------------------------------------
+# churn that is not recorded anywhere: derive it from a customer-by-month revenue table
+# ---------------------------------------------------------------------------
+
+_REV_NAME = re.compile(r"(revenue|sales|billing|billed|invoice|amount|mrr|arr|spend|turnover|income|gmv|ltm)", re.I)
+_REV_SKIP = re.compile(r"(prior|previous|last_?year|pct|percent|ratio|growth|yoy|margin|(^|[_\s])(rate|share|change|diff|delta|count|num|score|index|avg|average|per)($|[_\s]))", re.I)
+_RATIOISH = re.compile(r"(pct|percent|ratio|rate|share|score|index|margin|avg|average|per_|flag|^is_)", re.I)
+_NAME_COL = re.compile(r"(^name$|(customer|client|account|company|organi[sz]ation)[_\s]*name$)", re.I)
+_ENT_HINT = re.compile(r"(customer|client|account|company|user|member|subscriber|partner|_id$|_hk$|_key$|^id$)", re.I)
+
+
+def _guess_entity(d: pd.DataFrame, exclude: set[str]) -> str | None:
+    best = None
+    for c in d.columns:
+        c = str(c)
+        if c in exclude or pd.api.types.is_float_dtype(d[c]) or not _ENT_HINT.search(c):
+            continue
+        nu = d[c].nunique(dropna=True)
+        if 30 <= nu <= len(d) / 3 and (best is None or nu < best[0]):
+            best = (nu, c)
+    return best[1] if best else None
+
+
+def derive_revenue_churn(data_tables: dict[str, pd.DataFrame], link: dict | None):
+    """When no table records churn, look for a customer x month table with a revenue column and define churn as the
+    customer's trailing-12-month revenue falling to ~zero within the next H months. Each (customer, month) with revenue
+    is a snapshot; snapshots whose outcome is not yet observable stay unlabeled and are scored as the live population.
+    Returns (panel, spec, entity_col, source_table) or None."""
+    best = None
+    for n, d in data_tables.items():
+        if len(d) < 200:
+            continue
+        rev = [str(c) for c in d.columns if pd.api.types.is_numeric_dtype(d[c]) and _REV_NAME.search(str(c)) and not _REV_SKIP.search(str(c))]
+        if not rev:
+            continue
+        ent = (link or {}).get("columns", {}).get(n)
+        if ent not in d.columns:
+            ent = _guess_entity(d, set(rev))
+        if not ent:
+            continue
+        pcol = _period_date(d, exclude={ent})
+        if not pcol:
+            continue
+        t = parse_time_column(d[pcol])
+        if t.notna().mean() < 0.8 or t.dt.to_period("M").nunique() < 15:
+            continue
+        ltm = [c for c in rev if re.search(r"(ltm|trailing|rolling|t12m|12m)", c, re.I)]
+        prim = ltm[0] if ltm else next((c for c in rev if re.search("revenue", c, re.I)), rev[0])
+        score = (2.0 if ltm else 0.0) + (1.0 if re.search(r"(client|customer|account)", n, re.I) else 0.0) + min(len(d) / 1e5, 1.0)
+        if best is None or score > best[0]:
+            best = (score, n, d, ent, pcol, t, prim, bool(ltm))
+    if best is None:
+        return None
+    _sc, name, d, ent, pcol, t, prim, is_ltm = best
+
+    month = t.dt.to_period("M").dt.to_timestamp()
+    ok = month.notna() & d[ent].notna()
+    d, month = d[ok], month[ok]
+    if month.max() > month.min() + pd.DateOffset(years=15):
+        return None
+    grid = pd.date_range(month.min(), month.max(), freq="MS")
+    span = len(grid)
+    H = 12 if span >= 30 else 6 if span >= 15 else 3
+
+    num_cols = [str(c) for c in d.columns if str(c) not in (ent, pcol) and pd.api.types.is_numeric_dtype(d[c])][:40]
+    txt_cols = [str(c) for c in d.columns if str(c) not in (ent, pcol) and _is_text(d[c]) and 2 <= d[c].nunique(dropna=True) <= 12][:8]
+    work = d[[ent] + num_cols + txt_cols].copy()
+    work["__m"] = month.to_numpy()
+    spec_agg = {c: ("mean" if _RATIOISH.search(c) else "sum") for c in num_cols}
+    spec_agg.update({c: "last" for c in txt_cols})
+    agg = work.groupby([ent, "__m"], sort=False).agg(spec_agg).reset_index()
+    if agg.groupby(ent)["__m"].nunique().median() < 6:
+        return None
+
+    P = agg.pivot_table(index="__m", columns=ent, values=prim, aggfunc="sum").reindex(grid).fillna(0.0)
+    L = P if is_ltm else P.rolling(12, min_periods=12).sum()
+    C = L.to_numpy(float)
+    prior = L.shift(12).to_numpy(float)
+    prior3 = L.shift(3).to_numpy(float)
+    F = L.shift(-H).to_numpy(float)
+    last = np.broadcast_to(C[-1], C.shape)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        Y = np.full(C.shape, np.nan)
+        known = ~np.isnan(F)
+        Y[known] = (F[known] <= 0.1 * C[known]).astype(float)
+        tail = ~known & (last <= 0.1 * C)  # already (nearly) stopped buying within the observed tail
+        Y[tail] = 1.0
+        yoy_pct = np.where(prior > 0, (C - prior) / prior, np.nan)
+        tr3 = np.where(prior3 > 0, (C - prior3) / prior3, np.nan)
+    active = np.where(np.isnan(C), False, C > 0)
+    ri, ci = np.nonzero(active)
+    seen = (P.to_numpy(float) > 0).cumsum(axis=0)
+    lab = f"churn_next_{H}m"
+    panel = pd.DataFrame({
+        ent: P.columns.to_numpy()[ci], "snapshot_month": grid[ri],
+        "ltm_revenue": C[ri, ci], "prior_year_ltm_revenue": prior[ri, ci], "revenue_change_vs_prior_year": (C - prior)[ri, ci],
+        "revenue_change_pct_vs_prior_year": yoy_pct[ri, ci], "revenue_change_pct_last_3m": tr3[ri, ci], "months_with_revenue_so_far": seen[ri, ci],
+        lab: Y[ri, ci],
+    })
+    extra = agg.rename(columns={"__m": "snapshot_month"})
+    extra = extra.drop(columns=[prim] if is_ltm and prim in extra.columns else [])
+    panel = panel.merge(extra, on=[ent, "snapshot_month"], how="left")
+    pos, neg = int((panel[lab] == 1).sum()), int((panel[lab] == 0).sum())
+    if pos < 20 or neg < 20:
+        return None
+
+    # a readable customer name, when any linked table has one
+    names = None
+    for n2, d2 in (data_tables or {}).items():
+        k2 = (link or {}).get("columns", {}).get(n2)
+        if not k2 or k2 not in d2.columns:
+            continue
+        for c in d2.columns:
+            if _NAME_COL.search(str(c)) and _is_text(d2[c]) and d2[c].nunique(dropna=True) >= 0.5 * d2[k2].nunique(dropna=True):
+                names = d2[[k2, c]].dropna().drop_duplicates(k2, keep="last").set_index(k2)[c]
+                break
+        if names is not None:
+            break
+    if names is not None:
+        panel["customer_name"] = panel[ent].map(names)
+
+    spec = {
+        "column": lab, "kind": "binary", "positive": [1.0], "negative": [0.0], "unknown": [], "derived": True,
+        "name": f"{name} · customer-month history (derived)", "source_table": name, "horizon_months": H,
+        "value_col": "ltm_revenue", "period_col": "snapshot_month",
+        "description": f"No outcome column exists, so churn is derived from '{prim}': a customer counts as churned when its 12-month revenue falls to "
+                       f"10% or less within the next {H} months. Customers still buying are scored for the same risk.",
+    }
+    return panel, spec, ent, name
+
+
 # ---------------------------------------------------------------------------
 # public entry points (top-level so they can run in the process pool)
 # ---------------------------------------------------------------------------
@@ -339,6 +471,19 @@ def _analyse(tables: dict[str, pd.DataFrame]) -> dict[str, Any]:
             score = {"binary": 4.0, "categorical": 3.0}[s["kind"]] + min(len(d) / 1e6, 1)
             if score > best_score:
                 base_name, spec, best_score = n, s, score
+    if spec is None:
+        try:
+            derived = derive_revenue_churn(data_tables, link)
+        except Exception:
+            derived = None
+        if derived:
+            panel, spec, ent, src = derived
+            base_name = spec["name"]
+            data_tables = {**data_tables, base_name: panel}
+            if link:
+                link = {**link, "tables": [t for t in link["tables"] if t != src] + [base_name], "columns": {**link["columns"], base_name: ent}}
+            else:
+                link = {"name": ent, "tables": [base_name], "columns": {base_name: ent}}
     return {"dict_tables": dict_tables, "hints": hints, "data_tables": data_tables, "link": link, "base": base_name, "label": spec}
 
 
@@ -350,7 +495,7 @@ def plan_workspace(tables: dict[str, pd.DataFrame], meta: dict[str, dict] | None
     base_name, spec, link = a["base"], a["label"], a["link"]
     rows = []
     for n, d in tables.items():
-        role = "dictionary" if n in a["dict_tables"] else "base" if n == base_name else "events" if (link and n in link["tables"]) else "other"
+        role = "dictionary" if n in a["dict_tables"] else "base" if (n == base_name or (spec and n == spec.get("source_table"))) else "events" if (link and n in link["tables"]) else "other"
         rows.append({"name": n, "rows": int(len(d)), "columns": int(d.shape[1]), "role": role, **((meta or {}).get(n, {}))})
 
     # per-flow feasibility: best score across tables (churn is judged on the discovered label)
@@ -364,9 +509,10 @@ def plan_workspace(tables: dict[str, pd.DataFrame], meta: dict[str, dict] | None
             if cur is None or f["feasibility"]["score"] > cur["feasibility"]["score"]:
                 flows[f["key"]] = {**f, "table": n}
     if spec:
-        y = apply_label(tables[base_name], spec)
+        y = apply_label(a["data_tables"][base_name], spec)
         pos, neg, unk = int((y == 1).sum()), int((y == 0).sum()), int(y.isna().sum())
-        sig = [f"Outcome '{spec['column']}' in {base_name}: {pos:,} churned, {neg:,} retained" + (f", {unk:,} still open" if unk else "")]
+        sig = [(spec["description"] + f" ({pos:,} churned, {neg:,} retained, {unk:,} still active)") if spec.get("derived")
+               else f"Outcome '{spec['column']}' in {base_name}: {pos:,} churned, {neg:,} retained" + (f", {unk:,} still open" if unk else "")]
         if link:
             sig.append(f"{len(link['tables']) - 1} linked table(s) via {link['columns'][base_name] if base_name in link['columns'] else link['name']}")
         flows["churn"]["feasibility"] = {"score": 100 if pos >= 100 else 60, "verdict": "strong" if pos >= 100 else "possible", "signals": sig, "missing": []}
@@ -378,7 +524,7 @@ def plan_workspace(tables: dict[str, pd.DataFrame], meta: dict[str, dict] | None
         f.pop("table", None)
     return clean({
         "tables": rows, "link_key": link["name"] if link else None, "base_table": base_name,
-        "label": ({"column": spec["column"], "kind": spec["kind"], "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"], "counts": {"churned": pos, "retained": neg, "open": unk}} if spec else None),
+        "label": ({"column": spec["column"], "kind": spec["kind"], "derived": spec.get("description"), "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"], "counts": {"churned": pos, "retained": neg, "open": unk}} if spec else None),
         "flows": flow_list, "runnable": bool(spec),
         "reason": None if spec else "No churn outcome was found in this workspace's datasets.",
     })
@@ -392,7 +538,7 @@ def stage_discover(ctx):
         raise ValueError("No churn outcome found. Looked for an outcome column with values such as Churned / Won / Lost, "
                          "or a 0/1 churn flag, in: " + ", ".join(tables))
     base_name, spec, link = a["base"], a["label"], a["link"]
-    base = tables[base_name].reset_index(drop=True)
+    base = a["data_tables"][base_name].reset_index(drop=True)
     y = apply_label(base, spec)
 
     # account key
@@ -401,11 +547,11 @@ def stage_discover(ctx):
     if key is None:
         key = roles["entity"]
     label_cols = {spec["column"]}
-    period_name = _period_date(base, exclude={key} if key else set())
+    period_name = spec.get("period_col") or _period_date(base, exclude={key} if key else set())
     period = parse_time_column(base[period_name]) if period_name else None
     if period is not None and period.notna().mean() < 0.5:
         period_name, period = None, None
-    value = _pick_value(base, y, label_cols | {c for c in (key, period_name) if c})
+    value = spec.get("value_col") or _pick_value(base, y, label_cols | {c for c in (key, period_name) if c})
 
     merged = base.copy()
     merged["__label__"] = y.to_numpy()
@@ -429,10 +575,11 @@ def stage_discover(ctx):
     exclude = [spec["column"]]
     result = {
         "base_table": base_name, "link_key": key,
-        "label": {"column": spec["column"], "kind": spec["kind"], "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"]},
+        "label": {"column": spec["column"], "kind": spec["kind"], "derived": spec.get("description"), "churned": spec["positive"], "retained": spec["negative"], "open": spec["unknown"]},
+        "source_table": spec.get("source_table"),
         "label_counts": {"churned": int((y == 1).sum()), "retained": int((y == 0).sum()), "unlabeled": int(y.isna().sum())},
         "period_col": period_name, "value_col": value,
-        "tables": [{"name": n, "rows": int(len(d)), "role": "dictionary" if n in a["dict_tables"] else "base" if n == base_name else ("events" if link and n in link["tables"] else "unused")} for n, d in tables.items()],
+        "tables": [{"name": n, "rows": int(len(d)), "role": "dictionary" if n in a["dict_tables"] else "base" if (n == base_name or n == spec.get("source_table")) else ("events" if link and n in link["tables"] else "unused")} for n, d in tables.items()],
         "attached": attached, "merged_columns": int(merged.shape[1]), "merged_rows": int(len(merged)), "log": log,
         "roles": roles_out, "exclude_columns": exclude,
     }

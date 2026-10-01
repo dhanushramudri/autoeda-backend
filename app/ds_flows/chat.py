@@ -91,7 +91,7 @@ def build_facts(run, df: pd.DataFrame | None, message: str) -> str:
             rr = r._asdict()
             why = ", ".join(_driver(rr[k]) for k in ("driver_1", "driver_2", "driver_3") if k in rr and isinstance(rr[k], str) and rr[k])
             out.append(f"  {rr['account']} | {str(rr.get('as_of_snapshot', ''))[:10]} | {rr['churn_probability'] * 100:.0f}% | {rr['risk_tier']} | {_num(rr.get(val, ''))} | {_num(rr.get('expected_value_at_risk', ''))} | {why or 'several factors'}")
-        fixed = {"account", "as_of_snapshot", "_m", "churn_probability", "risk_tier", "expected_value_at_risk", "driver_1", "driver_2", "driver_3", val}
+        fixed = {"account", "customer_name", "as_of_snapshot", "_m", "churn_probability", "risk_tier", "expected_value_at_risk", "driver_1", "driver_2", "driver_3", val}
         for c in [c for c in d.columns if c not in fixed][:3]:
             g = d.groupby([c, "risk_tier"]).size().unstack(fill_value=0)
             out.append(f"Customers by {c} and risk level: " + "; ".join(f"{k}: " + ", ".join(f"{t} {int(g.loc[k, t])}" for t in g.columns) for k in g.index[:10]) + ".")

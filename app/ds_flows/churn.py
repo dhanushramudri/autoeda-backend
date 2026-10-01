@@ -1325,6 +1325,8 @@ def stage_build(ctx):
         idx = acct.index
         for j, cn in enumerate(("d1", "d2", "d3"), start=1):
             a[f"driver_{j}"] = drivers[cn].reindex(idx).fillna("").values
+    if "customer_name" in work.columns:
+        a.insert(1, "customer_name", work.loc[acct.index, "customer_name"].astype(str).where(work.loc[acct.index, "customer_name"].notna(), "").values)
     excl = ctx["art"].get("excluded") or {}
     for c in _segment_columns(work, set(excl) | {x for x in roles.values() if isinstance(x, str)}):
         col = work.loc[acct.index, c]

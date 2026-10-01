@@ -271,7 +271,7 @@ def execute_run(run_id: int) -> None:
                     merged, base_df = new_art["merged"], new_art["base"]
                     roles = res["roles"]
                     params = {**params, "exclude_columns": res["exclude_columns"], "label_column": res["label"]["column"]}
-                    base_ds = by_name.get(res["base_table"])
+                    base_ds = by_name.get(res.get("source_table") or res["base_table"])
                     if base_ds is not None:
                         run.dataset_id = base_ds.id
                         run.dataset_name = base_ds.name
