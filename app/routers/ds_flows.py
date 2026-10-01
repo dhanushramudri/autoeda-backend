@@ -218,6 +218,49 @@ def get_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), curre
     return _full(_reap_if_stale(run, db))
 
 
+class ChatIn(BaseModel):
+    message: str = Field(min_length=1, max_length=1500)
+    history: list[dict] = Field(default_factory=list)
+
+
+@router.get("/runs/{run_id}/customers")
+def customers(workspace_id: int, run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
+    """Every scored customer (risk level, revenue, expected loss, main drivers, segments) as compact rows for the dashboard."""
+    import pandas as pd
+
+    from ..ds_flows.chat import load_customers
+
+    _assert_member(workspace_id, current_user, db)
+    run = _get_run(workspace_id, run_id, db)
+    df = load_customers(run)
+    if df is None:
+        raise HTTPException(status_code=404, detail="Customer list not ready")
+    key = "expected_value_at_risk" if "expected_value_at_risk" in df.columns else "churn_probability"
+    df = df.sort_values(key, ascending=False).head(20000)
+    rows = df.astype(object).where(pd.notna(df), None).values.tolist()
+    return {"columns": list(df.columns), "rows": rows, "truncated": len(df) >= 20000}
+
+
+@router.post("/runs/{run_id}/chat")
+def chat(workspace_id: int, run_id: int, body: ChatIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
+    from ..ai.providers.base import QuotaExceededError
+    from ..ds_flows.chat import answer
+
+    _assert_member(workspace_id, current_user, db)
+    run = _get_run(workspace_id, run_id, db)
+    if run.status != "completed":
+        raise HTTPException(status_code=400, detail="The analysis has not finished yet")
+    try:
+        return {"answer": answer(run, body.message.strip(), body.history)}
+    except QuotaExceededError:
+        raise HTTPException(status_code=429, detail="The AI service is busy — try again shortly")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception:
+        logger.exception("chat failed")
+        raise HTTPException(status_code=500, detail="Could not answer that — please try again")
+
+
 @router.delete("/runs/{run_id}")
 def delete_run(workspace_id: int, run_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user)):
     _assert_member(workspace_id, current_user, db)

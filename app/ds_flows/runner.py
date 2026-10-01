@@ -37,7 +37,7 @@ NEEDS = {
     "explain": ["work", "X", "selected", "test_idx", "model_train", "model_final", "prob"],
     "value": ["work", "prob", "test_idx", "p_hold_cal", "drivers"],
     "validate": ["work", "selected", "excluded", "split_kind", "test_idx", "p_hold_cal"],
-    "build": ["work", "prob", "tiers", "acct", "drivers", "score_type", "threshold", "best"],
+    "build": ["work", "prob", "tiers", "acct", "drivers", "score_type", "threshold", "best", "excluded"],
 }
 STAGE_TIMEOUT = {"discover": 600, "models": 1800, "explain": 600, "hypotheses": 600}
 DEFAULT_TIMEOUT = 600

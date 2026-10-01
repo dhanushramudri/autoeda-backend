@@ -1128,7 +1128,7 @@ def stage_value(ctx):
     acct_sorted = acct.sort_values("expected_loss" if v is not None else "prob", ascending=False)
     top_accounts = []
     drv = ctx["art"].get("drivers")
-    for idx, r in acct_sorted.head(25).iterrows():
+    for idx, r in acct_sorted.head(100).iterrows():
         d = [x for x in (drv.loc[idx].tolist() if drv is not None and idx in drv.index else []) if isinstance(x, str)]
         top_accounts.append({"entity": r["entity"], "date": r["date"], "probability": r["prob"], "tier": r["tier"],
                              "value": r.get("value"), "expected_loss": r.get("expected_loss"), "drivers": d})
@@ -1325,6 +1325,10 @@ def stage_build(ctx):
         idx = acct.index
         for j, cn in enumerate(("d1", "d2", "d3"), start=1):
             a[f"driver_{j}"] = drivers[cn].reindex(idx).fillna("").values
+    excl = ctx["art"].get("excluded") or {}
+    for c in _segment_columns(work, set(excl) | {x for x in roles.values() if isinstance(x, str)}):
+        col = work.loc[acct.index, c]
+        a[c] = col.astype(str).where(col.notna(), "").values
     a = a.sort_values("expected_value_at_risk" if "expected_value_at_risk" in a.columns else "churn_probability", ascending=False)
 
     enriched_csv = enriched.to_csv(index=False).encode("utf-8")
@@ -1340,6 +1344,23 @@ def stage_build(ctx):
         "enriched_csv": enriched_csv, "accounts_csv": acct_csv,
         "dictionary_csv": dictionary.to_csv(index=False).encode("utf-8"),
     }
+
+
+def _segment_columns(work: pd.DataFrame, skip: set, k: int = 3) -> list[str]:
+    """Low-cardinality text columns worth filtering customers by (plan, band, region...). Leaking columns are already in `skip`."""
+    hint = re.compile(r"(band|segment|tier|plan|type|group|region|stage|category|status)", re.I)
+    cands = []
+    for c in work.columns:
+        if c in META or c in skip:
+            continue
+        s = work[c]
+        if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
+            continue
+        nu = s.nunique(dropna=True)
+        miss = float(s.isna().mean())
+        if 2 <= nu <= 12 and miss < 0.5:
+            cands.append((0 if hint.search(str(c)) else 1, miss, str(c)))
+    return [c for _h, _m, c in sorted(cands)[:k]]
 
 
 STAGES = [
