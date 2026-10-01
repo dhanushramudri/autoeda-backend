@@ -52,11 +52,14 @@ def get_current_user(
     from .models.user import User
 
     if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        # No login required — return the first admin user as the current user
+        admin = db.query(User).filter(User.is_admin == True, User.is_active == True).first()  # noqa: E712
+        if not admin:
+            admin = db.query(User).filter(User.is_active == True).first()  # noqa: E712
+        if not admin:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No users found in database")
+        return admin
+
     payload = decode_token(token)
     user_id: int = payload.get("sub")
     if user_id is None:
