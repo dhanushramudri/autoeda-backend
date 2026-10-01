@@ -309,6 +309,33 @@ def refresh_dataset(
     return resp
 
 
+class DatasetRename(BaseModel):
+    name: str
+
+
+@router.patch("/workspaces/{workspace_id}/datasets/{dataset_id}", response_model=DatasetResponse)
+def rename_dataset(
+    workspace_id: int,
+    dataset_id: int,
+    body: DatasetRename,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    assert_dataset_access(ds, current_user, db, ["admin", "analyst"])
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name can't be empty")
+    if len(name) > 250:
+        raise HTTPException(status_code=400, detail="Name is too long (250 characters max)")
+    ds.name = name
+    db.commit()
+    db.refresh(ds)
+    return ds
+
+
 class ScheduleRefreshRequest(BaseModel):
     interval_minutes: Optional[int] = None
 
