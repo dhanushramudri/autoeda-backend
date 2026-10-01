@@ -477,6 +477,20 @@ def execute_forecast_run(run_id: int) -> None:
                 else:
                     st["summary"] = f"{key}: done"
                 st["status"] = "done"
+                if key == "report" and isinstance(res, dict):
+                    # Mirrors execute_run: the headline/narrative/markdown live on the run row, not just
+                    # inside results_json, so the frontend's Dashboard/Analysis toggle (gated on run.headline) shows up.
+                    persist(
+                        headline_json=json.dumps(res.get("headline"), default=str),
+                        narrative_json=json.dumps(res.get("narrative"), default=str),
+                        markdown=res.get("markdown"),
+                    )
+                if key == "deliver":
+                    persist(
+                        enriched_csv=art.get("enriched_csv"),
+                        accounts_csv=art.get("accounts_csv"),
+                        dictionary_csv=art.get("dictionary_csv"),
+                    )
             except (AnalysisTimeout, AnalysisCrashed) as e:
                 st["status"], st["summary"], st["logs"] = "error", str(e), [str(e)]
             except Exception as e:
