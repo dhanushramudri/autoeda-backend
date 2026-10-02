@@ -257,6 +257,7 @@ def execute_run(run_id: int) -> None:
             return
         stages = json.loads(run.stages_json)
         params = json.loads(run.params_json or "{}")
+        params["flow_key"] = run.flow_key  # stage_discover uses this to pick churn vs. growth label detection
         results: dict = {}
 
         def persist(**fields):

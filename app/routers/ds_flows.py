@@ -184,6 +184,8 @@ def create_run(
     flow = get_flow(payload.flow_key)
     if flow is None:
         raise HTTPException(status_code=404, detail="Unknown flow")
+    if flow["status"] != "available":
+        raise HTTPException(status_code=400, detail=f"{flow['category']} isn't available yet")
     datasets = _visible_datasets(workspace_id, db, payload.dataset_ids)
     if not datasets:
         raise HTTPException(status_code=400, detail="This workspace has no datasets to analyse")

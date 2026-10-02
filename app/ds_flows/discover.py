@@ -32,6 +32,13 @@ NOT_CHURN = re.compile(r"(not|non|no)[ _-]*churn", re.I)
 WON_WORDS = re.compile(r"(^won$|renew|retain|active|stay|success|kept)", re.I)
 OPEN_WORDS = re.compile(r"(open|pending|in progress|tbd|unknown|n/?a|not yet|undecided|current)", re.I)
 LABEL_NAME = re.compile(r"(outcome|status|result|churn|label|target|decision)", re.I)
+
+# Revenue Growth: the same shape of label detection as churn, but looking for a cross-sell / upsell / conversion
+# outcome instead of a churn one. Mirrors the signal patterns the feasibility scanner already uses (registry.py).
+GROWTH_WORDS = re.compile(r"(cross.?sell|upsell|netsell|new.?client|new.?business|expansion|convert(?:ed)?|lead.?won|^won$|opportunity.?won|grew|growth|expand)", re.I)
+NOT_GROWTH_WORDS = re.compile(r"(not|non|no)[ _-]*(cross.?sell|upsell|convert|won|growth)", re.I)
+STAYED_WORDS = re.compile(r"(churn|lost|declin|^flat$|stayed|no.?change|stagnant|^same$|^renew(?:al)?$|^standard$|existing)", re.I)
+GROWTH_LABEL_NAME = re.compile(r"(outcome|status|result|label|target|decision|propensity|conversion)", re.I)
 KEY_NAME = re.compile(r"(_id|id|_ref|ref|_key|key|_hk|_no|number|code)$", re.I)
 EVENT_DATE_NAME = re.compile(r"(date|time|created|sent|call|contact)", re.I)
 PERIOD_NAME = re.compile(r"(renewal[_ ]?(month|period)|snapshot|as_of|calculated|billing[_ ]?month|period|^month)", re.I)
@@ -130,6 +137,46 @@ def detect_label(df: pd.DataFrame, hints: dict[str, str] | None = None) -> dict 
             if (info and 0.005 <= info["rate"] <= 0.7
                     and re.search(r"(^|[_\s-])(churn\w*|target|target_flag|attrition|cancel\w*|defect\w*|lapse\w*)([_\s-]|$)", c, re.I)
                     and not re.search(r"(engaged|increase|decrease|adopted|enabled|above|activated)", c, re.I)):
+                vals = list(s.dropna().unique())
+                pos = [info["positive"]]
+                neg = [v for v in vals if v != info["positive"]]
+                consider({"column": c, "kind": "binary", "positive": pos, "negative": neg, "unknown": []}, 4.0 + hint_score)
+    return best[1] if best else None
+
+
+def detect_growth_label(df: pd.DataFrame, hints: dict[str, str] | None = None) -> dict | None:
+    """Same approach as detect_label, but for a growth outcome (cross-sell / upsell / conversion won) instead of churn."""
+    hints = hints or {}
+    best = None
+
+    def consider(spec, score):
+        nonlocal best
+        if best is None or score > best[0]:
+            best = (score, spec)
+
+    for c in df.columns:
+        c = str(c)
+        s = df[c]
+        desc = hints.get(c.lower(), "")
+        hint_score = 1.5 if re.search(r"(cross.?sell|upsell|expansion|convert|propensity)", desc, re.I) else 0.0
+        if _is_text(s) and 2 <= s.nunique(dropna=True) <= 12:
+            vals = [v for v in s.dropna().astype(str).unique()]
+            pos = [v for v in vals if GROWTH_WORDS.search(v) and not NOT_GROWTH_WORDS.search(v)]
+            if not pos:
+                continue
+            neg = [v for v in vals if v not in pos and STAYED_WORDS.search(v)]
+            unk = [v for v in vals if v not in pos and v not in neg]
+            lab = s.astype(str).isin(pos + neg)
+            rate = s.astype(str).isin(pos)[lab].mean() if lab.any() else 0
+            if lab.mean() < 0.5 or not (0.005 <= rate <= 0.7) or not neg:
+                continue
+            score = 3.0 + (1.5 if GROWTH_LABEL_NAME.search(c) else 0) + hint_score
+            consider({"column": c, "kind": "categorical", "positive": pos, "negative": neg, "unknown": unk}, score)
+        else:
+            info = _binary_info(s)
+            if (info and 0.005 <= info["rate"] <= 0.7
+                    and re.search(r"(^|[_\s-])(convert\w*|lead_?won|won|upsell\w*|cross_?sell\w*|expansion\w*|propensity\w*)([_\s-]|$)", c, re.I)
+                    and not re.search(r"(churn|lost|cancel)", c, re.I)):
                 vals = list(s.dropna().unique())
                 pos = [info["positive"]]
                 neg = [v for v in vals if v != info["positive"]]
@@ -346,11 +393,22 @@ def _guess_entity(d: pd.DataFrame, exclude: set[str]) -> str | None:
     return best[1] if best else None
 
 
-def derive_revenue_churn(data_tables: dict[str, pd.DataFrame], link: dict | None):
-    """When no table records churn, look for a customer x month table with a revenue column and define churn as the
-    customer's trailing-12-month revenue falling to ~zero within the next H months. Each (customer, month) with revenue
-    is a snapshot; snapshots whose outcome is not yet observable stay unlabeled and are scored as the live population.
-    Returns (panel, spec, entity_col, source_table) or None."""
+def _lookup_customer_name(data_tables: dict[str, pd.DataFrame], link: dict | None, ent: str) -> pd.Series | None:
+    """A readable customer name, when any linked table has one, keyed by the entity column."""
+    for n2, d2 in (data_tables or {}).items():
+        k2 = (link or {}).get("columns", {}).get(n2)
+        if not k2 or k2 not in d2.columns:
+            continue
+        for c in d2.columns:
+            if _NAME_COL.search(str(c)) and _is_text(d2[c]) and d2[c].nunique(dropna=True) >= 0.5 * d2[k2].nunique(dropna=True):
+                return d2[[k2, c]].dropna().drop_duplicates(k2, keep="last").set_index(k2)[c]
+    return None
+
+
+def _prepare_revenue_panel(data_tables: dict[str, pd.DataFrame], link: dict | None) -> dict | None:
+    """Shared by derive_revenue_churn and derive_growth_from_revenue: find a customer x month table with a revenue
+    column and build the (customer, month) panel — trailing-12-month revenue, prior-year revenue and short-term
+    trend — that either outcome gets computed on top of. Returns None if no suitable table exists."""
     best = None
     for n, d in data_tables.items():
         if len(d) < 200:
@@ -403,77 +461,122 @@ def derive_revenue_churn(data_tables: dict[str, pd.DataFrame], link: dict | None
     prior = L.shift(12).to_numpy(float)
     prior3 = L.shift(3).to_numpy(float)
     F = L.shift(-H).to_numpy(float)
-    last = np.broadcast_to(C[-1], C.shape)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        yoy_pct = np.where(prior > 0, (C - prior) / prior, np.nan)
+        tr3 = np.where(prior3 > 0, (C - prior3) / prior3, np.nan)
+    active = np.where(np.isnan(C), False, C > 0)
+    ri, ci = np.nonzero(active)
+    seen = (P.to_numpy(float) > 0).cumsum(axis=0)
+    base_cols = {
+        ent: P.columns.to_numpy()[ci], "snapshot_month": grid[ri],
+        "ltm_revenue": C[ri, ci], "prior_year_ltm_revenue": prior[ri, ci], "revenue_change_vs_prior_year": (C - prior)[ri, ci],
+        "revenue_change_pct_vs_prior_year": yoy_pct[ri, ci], "revenue_change_pct_last_3m": tr3[ri, ci], "months_with_revenue_so_far": seen[ri, ci],
+    }
+    extra = agg.rename(columns={"__m": "snapshot_month"})
+    extra = extra.drop(columns=[prim] if is_ltm and prim in extra.columns else [])
+    return {
+        "name": name, "ent": ent, "prim": prim, "H": H, "C": C, "F": F, "ri": ri, "ci": ci,
+        "last": np.broadcast_to(C[-1], C.shape), "base_cols": base_cols, "extra": extra,
+    }
+
+
+def derive_revenue_churn(data_tables: dict[str, pd.DataFrame], link: dict | None):
+    """When no table records churn, look for a customer x month table with a revenue column and define churn as the
+    customer's trailing-12-month revenue falling to ~zero within the next H months. Each (customer, month) with revenue
+    is a snapshot; snapshots whose outcome is not yet observable stay unlabeled and are scored as the live population.
+    Returns (panel, spec, entity_col, source_table) or None."""
+    prep = _prepare_revenue_panel(data_tables, link)
+    if prep is None:
+        return None
+    C, F, last, ri, ci, H = prep["C"], prep["F"], prep["last"], prep["ri"], prep["ci"], prep["H"]
     with np.errstate(invalid="ignore", divide="ignore"):
         Y = np.full(C.shape, np.nan)
         known = ~np.isnan(F)
         Y[known] = (F[known] <= 0.1 * C[known]).astype(float)
         tail = ~known & (last <= 0.1 * C)  # already (nearly) stopped buying within the observed tail
         Y[tail] = 1.0
-        yoy_pct = np.where(prior > 0, (C - prior) / prior, np.nan)
-        tr3 = np.where(prior3 > 0, (C - prior3) / prior3, np.nan)
-    active = np.where(np.isnan(C), False, C > 0)
-    ri, ci = np.nonzero(active)
-    seen = (P.to_numpy(float) > 0).cumsum(axis=0)
     lab = f"churn_next_{H}m"
-    panel = pd.DataFrame({
-        ent: P.columns.to_numpy()[ci], "snapshot_month": grid[ri],
-        "ltm_revenue": C[ri, ci], "prior_year_ltm_revenue": prior[ri, ci], "revenue_change_vs_prior_year": (C - prior)[ri, ci],
-        "revenue_change_pct_vs_prior_year": yoy_pct[ri, ci], "revenue_change_pct_last_3m": tr3[ri, ci], "months_with_revenue_so_far": seen[ri, ci],
-        lab: Y[ri, ci],
-    })
-    extra = agg.rename(columns={"__m": "snapshot_month"})
-    extra = extra.drop(columns=[prim] if is_ltm and prim in extra.columns else [])
-    panel = panel.merge(extra, on=[ent, "snapshot_month"], how="left")
+    panel = pd.DataFrame({**prep["base_cols"], lab: Y[ri, ci]})
+    panel = panel.merge(prep["extra"], on=[prep["ent"], "snapshot_month"], how="left")
     pos, neg = int((panel[lab] == 1).sum()), int((panel[lab] == 0).sum())
     if pos < 20 or neg < 20:
         return None
 
-    # a readable customer name, when any linked table has one
-    names = None
-    for n2, d2 in (data_tables or {}).items():
-        k2 = (link or {}).get("columns", {}).get(n2)
-        if not k2 or k2 not in d2.columns:
-            continue
-        for c in d2.columns:
-            if _NAME_COL.search(str(c)) and _is_text(d2[c]) and d2[c].nunique(dropna=True) >= 0.5 * d2[k2].nunique(dropna=True):
-                names = d2[[k2, c]].dropna().drop_duplicates(k2, keep="last").set_index(k2)[c]
-                break
-        if names is not None:
-            break
+    names = _lookup_customer_name(data_tables, link, prep["ent"])
     if names is not None:
-        panel["customer_name"] = panel[ent].map(names)
+        panel["customer_name"] = panel[prep["ent"]].map(names)
 
     spec = {
         "column": lab, "kind": "binary", "positive": [1.0], "negative": [0.0], "unknown": [], "derived": True,
-        "name": f"{name} · customer-month history (derived)", "source_table": name, "horizon_months": H,
+        "name": f"{prep['name']} · customer-month history (derived)", "source_table": prep["name"], "horizon_months": H,
         "value_col": "ltm_revenue", "period_col": "snapshot_month",
-        "description": f"No outcome column exists, so churn is derived from '{prim}': a customer counts as churned when its 12-month revenue falls to "
+        "description": f"No outcome column exists, so churn is derived from '{prep['prim']}': a customer counts as churned when its 12-month revenue falls to "
                        f"10% or less within the next {H} months. Customers still buying are scored for the same risk.",
     }
-    return panel, spec, ent, name
+    return panel, spec, prep["ent"], prep["name"]
+
+
+def derive_growth_from_revenue(data_tables: dict[str, pd.DataFrame], link: dict | None):
+    """Revenue Growth's equivalent of derive_revenue_churn: when no explicit cross-sell/upsell outcome exists, look
+    for a customer x month revenue table and define growth as the customer's trailing-12-month revenue rising by at
+    least 20% within the next H months. Unlike churn, there is no safe way to call an unobserved tail row "grew"
+    without foresight, so those rows simply stay unlabeled and are scored as the live upsell/cross-sell population.
+    Returns (panel, spec, entity_col, source_table) or None."""
+    prep = _prepare_revenue_panel(data_tables, link)
+    if prep is None:
+        return None
+    C, F, ri, ci, H = prep["C"], prep["F"], prep["ri"], prep["ci"], prep["H"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        Y = np.full(C.shape, np.nan)
+        known = ~np.isnan(F)
+        Y[known] = (F[known] >= 1.2 * np.maximum(C[known], 1e-9)).astype(float)
+    lab = f"grew_next_{H}m"
+    panel = pd.DataFrame({**prep["base_cols"], lab: Y[ri, ci]})
+    panel = panel.merge(prep["extra"], on=[prep["ent"], "snapshot_month"], how="left")
+    pos, neg = int((panel[lab] == 1).sum()), int((panel[lab] == 0).sum())
+    if pos < 20 or neg < 20:
+        return None
+
+    names = _lookup_customer_name(data_tables, link, prep["ent"])
+    if names is not None:
+        panel["customer_name"] = panel[prep["ent"]].map(names)
+
+    spec = {
+        "column": lab, "kind": "binary", "positive": [1.0], "negative": [0.0], "unknown": [], "derived": True,
+        "name": f"{prep['name']} · customer-month history (derived)", "source_table": prep["name"], "horizon_months": H,
+        "value_col": "ltm_revenue", "period_col": "snapshot_month",
+        "description": f"No growth/conversion outcome column exists, so growth is derived from '{prep['prim']}': an account counts as having grown "
+                       f"when its 12-month revenue rises by 20% or more within the next {H} months. Accounts not yet observable are scored as "
+                       f"upsell/cross-sell prospects.",
+    }
+    return panel, spec, prep["ent"], prep["name"]
 
 
 # ---------------------------------------------------------------------------
 # public entry points (top-level so they can run in the process pool)
 # ---------------------------------------------------------------------------
 
-def _analyse(tables: dict[str, pd.DataFrame]) -> dict[str, Any]:
+def _analyse(tables: dict[str, pd.DataFrame], flow_key: str = "churn") -> dict[str, Any]:
     dict_tables, hints = _dictionary_hints(tables)
     data_tables = {n: d for n, d in tables.items() if n not in dict_tables}
     link = find_link_key(data_tables) if len(data_tables) > 1 else None
 
+    # Which outcome to look for depends on the flow: churn wants a churned/retained label, revenue_growth wants a
+    # cross-sell/upsell/conversion one. Other flows aren't wired to a real pipeline yet and fall back to churn.
+    detect_fn = detect_growth_label if flow_key == "revenue_growth" else detect_label
+    derive_fn = derive_growth_from_revenue if flow_key == "revenue_growth" else derive_revenue_churn
+
     base_name, spec = None, None
     best_score = -1.0
     for n, d in data_tables.items():
-        s = detect_label(d, hints)
+        s = detect_fn(d, hints)
         if s:
             score = {"binary": 4.0, "categorical": 3.0}[s["kind"]] + min(len(d) / 1e6, 1)
             if score > best_score:
                 base_name, spec, best_score = n, s, score
     if spec is None:
         try:
-            derived = derive_revenue_churn(data_tables, link)
+            derived = derive_fn(data_tables, link)
         except Exception:
             derived = None
         if derived:
@@ -533,8 +636,12 @@ def plan_workspace(tables: dict[str, pd.DataFrame], meta: dict[str, dict] | None
 def stage_discover(ctx):
     """Stage 0: build the modelling table (one row per base row, in the original order)."""
     tables: dict[str, pd.DataFrame] = ctx["tables"]
-    a = _analyse(tables)
+    flow_key = (ctx.get("params") or {}).get("flow_key", "churn")
+    a = _analyse(tables, flow_key)
     if not a["label"]:
+        if flow_key == "revenue_growth":
+            raise ValueError("No growth outcome found. Looked for a cross-sell / upsell / conversion column (e.g. Outcome = Won / Converted, "
+                             "or a 0/1 upsell flag), or a customer x month revenue table to derive growth from, in: " + ", ".join(tables))
         raise ValueError("No churn outcome found. Looked for an outcome column with values such as Churned / Won / Lost, "
                          "or a 0/1 churn flag, in: " + ", ".join(tables))
     base_name, spec, link = a["base"], a["label"], a["link"]

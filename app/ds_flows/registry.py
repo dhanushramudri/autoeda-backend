@@ -37,12 +37,16 @@ FLOWS: list[dict[str, Any]] = [
         "outputs": ["Forecast with intervals", "Backtested model comparison", "Seasonality & trend findings"], "stages": [],
     },
     {
-        "key": "pricing", "category": "Pricing", "name": "Pricing & discount optimisation", "status": "available", "priority": 4,
+        # Not wired to a real pipeline yet — pricing isn't a churn-style binary label, it needs its own elasticity /
+        # discount-leakage analysis. Was briefly routed through the churn pipeline by mistake; pulled back until that
+        # real analysis exists so it stops producing churn results mislabeled as pricing.
+        "key": "pricing", "category": "Pricing", "name": "Pricing & discount optimisation", "status": "coming_soon", "priority": 4,
         "tagline": "Re-pricing, discounting and monetization strategies to defend or grow margin.",
         "outputs": ["Price elasticity", "Discount leakage", "Margin uplift scenarios"], "stages": [],
     },
     {
-        "key": "efficiency_cost", "category": "Efficiency & Cost", "name": "Efficiency & cost automation", "status": "available", "priority": 5,
+        # Same reason as pricing above: needs its own cost-driver / inefficiency analysis, not churn's binary label.
+        "key": "efficiency_cost", "category": "Efficiency & Cost", "name": "Efficiency & cost automation", "status": "coming_soon", "priority": 5,
         "tagline": "Automation and productivity playbooks that improve EBITDA and operating efficiency.",
         "outputs": ["Cost drivers", "Automation candidates", "EBITDA impact"], "stages": [],
     },
